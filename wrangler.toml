@@ -1,4 +1,4 @@
-name = "ofc-signaling"
+name = "ofc-gpt-signaling"
 main = "worker/worker.ts"
 compatibility_date = "2024-06-15"
 

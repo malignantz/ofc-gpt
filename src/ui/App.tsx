@@ -717,7 +717,7 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <div>
-          <div className="brand">Open-Face Chinese Poker</div>
+          <div className="brand">OFC-GPT</div>
           <div className="subtitle">P2P • Serverless • Fair Shuffle</div>
         </div>
         <button className="button secondary" onClick={() => setSettingsOpen((open) => !open)}>

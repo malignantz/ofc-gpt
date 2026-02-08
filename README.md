@@ -1,4 +1,4 @@
-# OFC P2P
+# OFC-GPT
 
 Serverless, P2P Open-Face Chinese Poker (Classic ruleset).
 
