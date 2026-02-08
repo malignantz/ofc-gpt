@@ -1,0 +1,37 @@
+{
+  "name": "ofc-p2p",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "worker:dev": "wrangler dev worker/worker.ts --port 8787"
+  },
+  "dependencies": {
+    "@react-spring/web": "^9.7.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.2",
+    "@cloudflare/workers-types": "^4.20241011.0",
+    "eslint": "^9.7.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.7",
+    "typescript": "^5.5.4",
+    "vite": "^7.3.1",
+    "vitest": "^3.0.5",
+    "wrangler": "^4.63.0"
+  }
+}
