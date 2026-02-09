@@ -125,6 +125,13 @@ body {
   gap: 6px;
 }
 
+.status-room {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #5a4f45;
+  font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
 .table-actions {
   display: flex;
   gap: 8px;
@@ -674,6 +681,64 @@ select {
   overflow: auto;
   display: grid;
   gap: 12px;
+}
+
+.rules-modal {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(84vh, 780px);
+  overflow: hidden;
+  display: grid;
+  gap: 12px;
+  background:
+    radial-gradient(circle at top right, rgba(231, 210, 164, 0.32), rgba(255, 255, 255, 0.9) 45%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 242, 234, 0.95));
+  border: 1px solid rgba(190, 169, 133, 0.45);
+  box-shadow: 0 28px 70px rgba(32, 24, 18, 0.2);
+}
+
+.rules-intro {
+  margin: 0;
+  color: #5e5348;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.rules-scroll {
+  display: grid;
+  gap: 10px;
+  max-height: min(62vh, 560px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.rules-card {
+  border: 1px solid rgba(198, 182, 154, 0.6);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(251, 247, 240, 0.92));
+  box-shadow: 0 10px 24px rgba(41, 32, 24, 0.06);
+}
+
+.rules-card h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #3f3529;
+}
+
+.rules-card ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.rules-card li {
+  color: #332b21;
+  line-height: 1.35;
+  font-size: 13px;
 }
 
 .scoreboard-list {

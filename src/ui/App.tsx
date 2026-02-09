@@ -8,6 +8,7 @@ import { GameTable } from './components/GameTable'
 import { toRoomSlug } from './utils/roomNames'
 import { ROUND_TAKEOVER_TIMEOUT_MS, getRoundRestartDecision } from './utils/roundControl'
 import { ScoreboardEntry, readScoreboardEntriesFromLocalStorage } from './utils/scoreboard'
+import { resolveIncomingState, shouldIgnoreRegressiveSnapshot } from './utils/snapshotConsistency'
 import { hydrateRoomState, seedActionCounterFromLog } from '../sync/roomHydration'
 import { WAITING_OPPONENT_ID } from '../sync/constants'
 import {
@@ -102,12 +103,54 @@ function scoreClass(value: number): string {
   return ''
 }
 
+const RULES_SECTIONS: Array<{ title: string; bullets: string[] }> = [
+  {
+    title: 'Goal',
+    bullets: [
+      'Build three poker rows over 13 cards: Top (3), Middle (5), Bottom (5).',
+      'Your hand must be ordered Bottom >= Middle >= Top in poker strength.',
+      'Beat your opponent row-by-row to win points.'
+    ]
+  },
+  {
+    title: 'Round Flow',
+    bullets: [
+      'Each player starts with 5 cards and places all 5.',
+      'Then cards arrive one at a time until all 13 are placed.',
+      'No moving cards after they are placed.'
+    ]
+  },
+  {
+    title: 'Fouls',
+    bullets: [
+      'If your final rows are out of order, your hand fouls.',
+      'A fouled hand loses the matchup for that round.'
+    ]
+  },
+  {
+    title: 'Scoring Basics',
+    bullets: [
+      'Compare Top vs Top, Middle vs Middle, Bottom vs Bottom.',
+      'Win more rows than your opponent to score positive points.',
+      'Row bonuses (royalties) and sweep bonuses can apply.'
+    ]
+  },
+  {
+    title: 'Dealer / Restart',
+    bullets: [
+      'Dealer button alternates each round.',
+      'Dealer starts the next round; if dealer is offline, takeover unlocks after 10s.'
+    ]
+  }
+]
+
 export default function App() {
   const roomStore = useMemo(() => createRoomStore(), [])
   const [view, setView] = useState<View>('lobby')
   const [playerCount, setPlayerCount] = useState(2)
   const [playerName, setPlayerName] = useState(() => readLocalPlayerName())
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [rulesOpen, setRulesOpen] = useState(false)
   const [scoreboardOpen, setScoreboardOpen] = useState(false)
   const [scoreboardEntries, setScoreboardEntries] = useState<ScoreboardEntry[]>([])
   const [fourColorDeck, setFourColorDeck] = useState(true)
@@ -133,6 +176,7 @@ export default function App() {
   const useCrypto = false
 
   const roomSlugRef = useRef<string | null>(null)
+  const stateRef = useRef<GameState | null>(null)
   const autoJoinRef = useRef(false)
   const nameBroadcastTimerRef = useRef<number | null>(null)
   const autoDrawRef = useRef('')
@@ -250,8 +294,10 @@ export default function App() {
 
   const applySnapshot = useCallback(
     (snapshot: RoomSnapshot) => {
+      const previousGameId = activeGameIdRef.current
+      const incomingGameId = snapshot.meta?.currentGameId ?? null
       roomReadyRef.current = Boolean(snapshot.meta)
-      activeGameIdRef.current = snapshot.meta?.currentGameId ?? null
+      activeGameIdRef.current = incomingGameId
       const now = Date.now()
       const participantMap: Record<string, ParticipantPresence> = {}
       snapshot.participants.forEach((participant) => {
@@ -312,8 +358,11 @@ export default function App() {
         participants: snapshot.participants,
         actionRecords: snapshot.actions
       })
-      const shouldPreferPersistedState = hydrated.droppedActionIds.length > 0 && Boolean(snapshot.gameState)
-      const resolvedState = shouldPreferPersistedState ? snapshot.gameState : hydrated.state ?? snapshot.gameState
+      const resolvedState = resolveIncomingState({
+        hydratedState: hydrated.state,
+        persistedState: snapshot.gameState,
+        droppedActionCount: hydrated.droppedActionIds.length
+      })
       setConnectedPeers(hydrated.connectedPeerIds)
 
       const signature = `${snapshot.roomId}|${snapshot.meta?.currentGameId ?? 'none'}|${
@@ -323,6 +372,16 @@ export default function App() {
       lastHydrationSignatureRef.current = signature
 
       if (resolvedState) {
+        const shouldIgnore = shouldIgnoreRegressiveSnapshot({
+          previousGameId,
+          incomingGameId,
+          currentActionCount: stateRef.current?.actionLog.length ?? 0,
+          incomingActionCount: resolvedState.actionLog.length
+        })
+        if (shouldIgnore) {
+          flushOutboundQueue(snapshot.roomId)
+          return
+        }
         actionCounter.value = seedActionCounterFromLog(resolvedState.actionLog, localPlayerId, actionCounter.value)
         setState(resolvedState)
         if (!snapshot.gameState) {
@@ -569,6 +628,10 @@ export default function App() {
   }, [applySnapshot, roomStore, roundRestartDecision.canStartNextRound, roundRestartDecision.nextRoundHint])
 
   useEffect(() => {
+    stateRef.current = state
+  }, [state])
+
+  useEffect(() => {
     writeLocalPlayerName(playerName)
   }, [playerName])
 
@@ -583,16 +646,22 @@ export default function App() {
   }, [scoreboardOpen])
 
   useEffect(() => {
-    if (!scoreboardOpen) return
+    if (!scoreboardOpen && !rulesOpen) return
     if (typeof window === 'undefined') return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setScoreboardOpen(false)
+        if (rulesOpen) {
+          setRulesOpen(false)
+          return
+        }
+        if (scoreboardOpen) {
+          setScoreboardOpen(false)
+        }
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [scoreboardOpen])
+  }, [rulesOpen, scoreboardOpen])
 
   useEffect(() => {
     roomSlugRef.current = roomSlug
@@ -959,9 +1028,19 @@ export default function App() {
           <button
             className="button secondary"
             onClick={() => {
+              setScoreboardOpen(false)
+              setRulesOpen(true)
+            }}
+          >
+            Rules
+          </button>
+          <button
+            className="button secondary"
+            onClick={() => {
               if (typeof window !== 'undefined') {
                 setScoreboardEntries(readScoreboardEntriesFromLocalStorage(window.localStorage))
               }
+              setRulesOpen(false)
               setScoreboardOpen(true)
             }}
           >
@@ -972,6 +1051,38 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {rulesOpen && (
+        <div className="modal-backdrop" onClick={() => setRulesOpen(false)} role="presentation">
+          <section
+            className="panel rules-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Open Face Chinese Poker Rules"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="settings-header">
+              <h3>Open Face Chinese Poker Rules</h3>
+              <button className="settings-close" onClick={() => setRulesOpen(false)} aria-label="Close rules">
+                &times;
+              </button>
+            </div>
+            <p className="rules-intro">Quick reference for classic heads-up play used in this app.</p>
+            <div className="rules-scroll">
+              {RULES_SECTIONS.map((section) => (
+                <section key={section.title} className="rules-card">
+                  <h4>{section.title}</h4>
+                  <ul>
+                    {section.bullets.map((bullet) => (
+                      <li key={bullet}>{bullet}</li>
+                    ))}
+                  </ul>
+                </section>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
 
       {scoreboardOpen && (
         <div className="modal-backdrop" onClick={() => setScoreboardOpen(false)} role="presentation">
@@ -1062,6 +1173,7 @@ export default function App() {
         <GameTable
           state={activeTableState}
           localPlayerId={localPlayerId}
+          roomName={roomSlug ?? undefined}
           connectivityByPlayerId={connectivityByPlayerId}
           waitingMessage={waitingMessage}
           onPlace={(card, target) =>

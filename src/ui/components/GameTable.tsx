@@ -41,6 +41,7 @@ const LINE_LIMITS: Record<keyof LinesState, number> = { top: 3, middle: 5, botto
 export type GameTableProps = {
   state: GameState
   localPlayerId: string
+  roomName?: string
   connectivityByPlayerId?: Record<string, boolean>
   waitingMessage?: string | null
   onPlace: (card: string, target: keyof LinesState) => void
@@ -56,6 +57,7 @@ export type GameTableProps = {
 export function GameTable({
   state,
   localPlayerId,
+  roomName,
   connectivityByPlayerId,
   waitingMessage,
   onPlace,
@@ -424,11 +426,14 @@ export function GameTable({
     <section className="panel table-shell">
       <div className="table-header">
         <div className="table-status">
-          <div className="status-message">{statusMessage}</div>
-          <div className="status-detail">
-            <span className={`presence-dot ${isConnected(localPlayerId) ? 'presence-online' : 'presence-offline'}`} />
-            {localPlayer?.name ?? 'You'}
-            {localPlayer?.seat === state.dealerSeat && <span className="dealer-chip">D</span>}
+          <div>
+            <div className="status-message">{statusMessage}</div>
+            <div className="status-detail">
+              <span className={`presence-dot ${isConnected(localPlayerId) ? 'presence-online' : 'presence-offline'}`} />
+              {localPlayer?.name ?? 'You'}
+              {localPlayer?.seat === state.dealerSeat && <span className="dealer-chip">D</span>}
+            </div>
+            {roomName ? <div className="status-room">Room: {roomName}</div> : null}
           </div>
         </div>
         <div className="table-actions">
