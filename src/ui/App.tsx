@@ -133,6 +133,8 @@ export default function App() {
   const bootstrapInProgressRef = useRef(false)
   const bootstrapRoomRef = useRef<string | null>(null)
   const bootstrapStartedAtRef = useRef(0)
+  const roomReadyRef = useRef(false)
+  const outboundActionQueueRef = useRef<GameAction[]>([])
 
   const enqueueDeferred = useCallback((action: GameAction) => {
     if (deferredActionsRef.current.some((entry) => entry.action.id === action.id)) return
@@ -183,8 +185,40 @@ export default function App() {
     return `${localPlayerId}-${actionCounter.value}`
   }, [actionCounter, localPlayerId])
 
+  const queueOutboundAction = useCallback((action: GameAction) => {
+    if (outboundActionQueueRef.current.some((entry) => entry.id === action.id)) return
+    outboundActionQueueRef.current.push(action)
+  }, [])
+
+  const flushOutboundQueue = useCallback(
+    (roomId: string) => {
+      if (!roomReadyRef.current) return
+      if (outboundActionQueueRef.current.length === 0) return
+      const queued = [...outboundActionQueueRef.current]
+      outboundActionQueueRef.current = []
+      queued.forEach((action) => {
+        void roomStore
+          .appendAction({ roomId, actorId: localPlayerId, action })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : 'Failed to append action'
+            const suppressMissingRoomError =
+              bootstrapInProgressRef.current &&
+              bootstrapRoomRef.current === roomId &&
+              message.includes('does not exist')
+            if (!suppressMissingRoomError) {
+              setSyncError(message)
+            }
+            // Requeue on transient bootstrap races.
+            queueOutboundAction(action)
+          })
+      })
+    },
+    [localPlayerId, queueOutboundAction, roomStore]
+  )
+
   const applySnapshot = useCallback(
     (snapshot: RoomSnapshot) => {
+      roomReadyRef.current = Boolean(snapshot.meta)
       const now = Date.now()
       const participantMap: Record<string, ParticipantPresence> = {}
       snapshot.participants.forEach((participant) => {
@@ -260,6 +294,7 @@ export default function App() {
         if (!snapshot.gameState) {
           void roomStore.upsertGameState(snapshot.roomId, resolvedState).catch(() => undefined)
         }
+        flushOutboundQueue(snapshot.roomId)
       } else {
         setState(null)
       }
@@ -283,7 +318,7 @@ export default function App() {
         )
       }
     },
-    [actionCounter, localPlayerId, playerName, roomRole, roomStore]
+    [actionCounter, flushOutboundQueue, localPlayerId, playerName, roomRole, roomStore]
   )
 
   const returnToLobby = useCallback(() => {
@@ -310,6 +345,8 @@ export default function App() {
     bootstrapInProgressRef.current = false
     bootstrapRoomRef.current = null
     bootstrapStartedAtRef.current = 0
+    roomReadyRef.current = false
+    outboundActionQueueRef.current = []
   }, [localPlayerId, roomStore])
 
   const dispatchAndSync = useCallback(
@@ -317,13 +354,25 @@ export default function App() {
       dispatchAction(action)
       const activeRoom = roomSlugRef.current
       if (!activeRoom) return
+      if (!roomReadyRef.current) {
+        queueOutboundAction(action)
+        return
+      }
       void roomStore
         .appendAction({ roomId: activeRoom, actorId: localPlayerId, action })
         .catch((error) => {
-          setSyncError(error instanceof Error ? error.message : 'Failed to append action')
+          const message = error instanceof Error ? error.message : 'Failed to append action'
+          const suppressMissingRoomError =
+            bootstrapInProgressRef.current &&
+            bootstrapRoomRef.current === activeRoom &&
+            message.includes('does not exist')
+          if (!suppressMissingRoomError) {
+            setSyncError(message)
+          }
+          queueOutboundAction(action)
         })
     },
-    [dispatchAction, localPlayerId, roomStore]
+    [dispatchAction, localPlayerId, queueOutboundAction, roomStore]
   )
 
   const dispatchBatchAndSync = useCallback(
@@ -331,15 +380,27 @@ export default function App() {
       dispatchActions(actions)
       const activeRoom = roomSlugRef.current
       if (!activeRoom) return
+      if (!roomReadyRef.current) {
+        actions.forEach((action) => queueOutboundAction(action))
+        return
+      }
       actions.forEach((action) => {
         void roomStore
           .appendAction({ roomId: activeRoom, actorId: localPlayerId, action })
           .catch((error) => {
-            setSyncError(error instanceof Error ? error.message : 'Failed to append action')
+            const message = error instanceof Error ? error.message : 'Failed to append action'
+            const suppressMissingRoomError =
+              bootstrapInProgressRef.current &&
+              bootstrapRoomRef.current === activeRoom &&
+              message.includes('does not exist')
+            if (!suppressMissingRoomError) {
+              setSyncError(message)
+            }
+            queueOutboundAction(action)
           })
       })
     },
-    [dispatchActions, localPlayerId, roomStore]
+    [dispatchActions, localPlayerId, queueOutboundAction, roomStore]
   )
 
   const startDatabaseGame = useCallback(
@@ -382,6 +443,8 @@ export default function App() {
       setSyncError(null)
       setJoining(true)
       lastHydrationSignatureRef.current = ''
+      roomReadyRef.current = false
+      outboundActionQueueRef.current = []
       bootstrapInProgressRef.current = true
       bootstrapRoomRef.current = slug
       bootstrapStartedAtRef.current = Date.now()
@@ -442,6 +505,8 @@ export default function App() {
         bootstrapInProgressRef.current = false
         bootstrapRoomRef.current = null
         bootstrapStartedAtRef.current = 0
+        roomReadyRef.current = false
+        outboundActionQueueRef.current = []
         roomSlugRef.current = null
         setRoomSlug(null)
         setConnectedPeers([])
