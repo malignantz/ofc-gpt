@@ -185,6 +185,33 @@ describe('roomStore action writes', () => {
     expect(reloaded.gameState?.phase).toBe('play')
   })
 
+  it('supports lightweight snapshots without fetching persisted gameState', async () => {
+    const store = createRoomStore({
+      client: new FakeFirebaseClient(),
+      now: () => 100
+    })
+
+    await store.createRoom({
+      roomId: 'table-lite-snapshot',
+      displayName: 'table-lite-snapshot',
+      hostId: 'p1',
+      hostName: 'Host',
+      expectedPlayers: 2
+    })
+
+    await store.appendAction({
+      roomId: 'table-lite-snapshot',
+      actorId: 'p1',
+      action: { id: 'p1-1', type: 'ready', playerId: 'p1' }
+    })
+
+    const snapshot = await store.fetchRoomSnapshot('table-lite-snapshot', { includeGameState: false })
+    expect(snapshot.meta).not.toBeNull()
+    expect(snapshot.actions.map((action) => action.id)).toEqual(['p1-1'])
+    expect(snapshot.gameStateIncluded).toBe(false)
+    expect(snapshot.gameState).toBeNull()
+  })
+
   it('writes action records once and keeps idempotency by action id', async () => {
     let now = 100
     const store = createRoomStore({

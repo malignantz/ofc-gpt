@@ -139,10 +139,12 @@ describe('roomStore subscription sync', () => {
     })
 
     const observedActionCounts: number[] = []
+    const observedGameStateInclusion: boolean[] = []
     let latestHydratedActionIds: string[] = []
     const unsubscribe = store.subscribeRoomSnapshot('sync-room', {
       onUpdate: (snapshot) => {
         observedActionCounts.push(snapshot.actions.length)
+        observedGameStateInclusion.push(snapshot.gameStateIncluded)
         const hydrated = hydrateRoomState({
           localPlayerId: 'p2',
           localPlayerName: 'Guest',
@@ -154,7 +156,7 @@ describe('roomStore subscription sync', () => {
     })
 
     await manual.tick()
-    expect(observedActionCounts.at(-1)).toBe(0)
+    await manual.tick()
 
     await store.appendAction({
       roomId: 'sync-room',
@@ -168,8 +170,11 @@ describe('roomStore subscription sync', () => {
     })
 
     await manual.tick()
+    await manual.tick()
 
     expect(observedActionCounts.at(-1)).toBe(2)
+    expect(observedGameStateInclusion).toContain(true)
+    expect(observedGameStateInclusion).toContain(false)
     expect(latestHydratedActionIds).toEqual(['p1-1', 'p2-1'])
     unsubscribe()
   })

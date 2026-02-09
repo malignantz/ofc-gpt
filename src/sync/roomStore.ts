@@ -7,6 +7,10 @@ const ROOM_TTL_MS = 5 * 60 * 1000
 const ROOM_POLL_MS = 2000
 const DIRECTORY_POLL_MS = 3000
 const DIRECTORY_CLEANUP_MS = 60 * 1000
+const PRESENCE_LIVENESS_REFRESH_MS = 60 * 1000
+const SNAPSHOT_GAME_STATE_REFRESH_POLLS = 15
+const SNAPSHOT_PARTICIPANTS_REFRESH_POLLS = 5
+const SNAPSHOT_ACTIONS_REFRESH_POLLS = 5
 
 export type RoomRole = 'host' | 'guest'
 export type RoomStatus = 'waiting' | 'active' | 'ended'
@@ -28,6 +32,7 @@ export type RoomMeta = {
   hostId: string
   expectedPlayers: number
   currentGameId: string
+  actionsVersion: number
   dealerSeat: number
   createdAt: number
   updatedAt: number
@@ -61,6 +66,7 @@ export type RoomSnapshot = {
   participants: ParticipantPresence[]
   actions: ActionRecord[]
   gameState: GameState | null
+  gameStateIncluded: boolean
 }
 
 export type RoomStore = {
@@ -91,6 +97,7 @@ export type RoomStore = {
     playerId: string
     playerName: string
     role: RoomRole
+    joinedAt?: number
     pingToken?: string
     pingAt?: number
     ackForPeerPingToken?: string
@@ -102,7 +109,10 @@ export type RoomStore = {
     action: GameAction
     expectedGameId?: string
   }) => Promise<ActionRecord | null>
-  fetchRoomSnapshot: (roomId: string) => Promise<RoomSnapshot>
+  fetchRoomSnapshot: (
+    roomId: string,
+    options?: { includeParticipants?: boolean; includeActions?: boolean; includeGameState?: boolean }
+  ) => Promise<RoomSnapshot>
   upsertGameState: (roomId: string, state: GameState, expectedGameId?: string) => Promise<boolean>
   subscribeRoomSnapshot: (
     roomId: string,
@@ -227,6 +237,7 @@ function parseMeta(value: unknown): RoomMeta | null {
   const roomId = asString(value.roomId)
   const hostId = asString(value.hostId)
   const currentGameId = asString(value.currentGameId)
+  const actionsVersionRaw = asNumber(value.actionsVersion)
   const dealerSeatRaw = asNumber(value.dealerSeat)
   const createdAt = asNumber(value.createdAt)
   const updatedAt = asNumber(value.updatedAt)
@@ -240,6 +251,7 @@ function parseMeta(value: unknown): RoomMeta | null {
     hostId,
     expectedPlayers,
     currentGameId,
+    actionsVersion: actionsVersionRaw === null ? 0 : Math.max(0, Math.trunc(actionsVersionRaw)),
     dealerSeat,
     createdAt,
     updatedAt,
@@ -355,9 +367,66 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
 
   const withRoomPath = (roomId: string) => `/rooms/${roomKey(roomId)}`
   const withDirectoryPath = (roomId: string) => `/roomDirectory/${roomKey(roomId)}`
+  const lastLivenessRefreshByRoom = new Map<string, number>()
+
+  const parseAndMaybeMigrateMeta = async (roomId: string, rawMeta: unknown): Promise<RoomMeta | null> => {
+    let meta = parseMeta(rawMeta)
+    if (!meta && isRecord(rawMeta)) {
+      const roomIdValue = asString(rawMeta.roomId) ?? roomKey(roomId)
+      const hostId = asString(rawMeta.hostId)
+      const createdAt = asNumber(rawMeta.createdAt)
+      const updatedAt = asNumber(rawMeta.updatedAt)
+      const expiresAt = asNumber(rawMeta.expiresAt)
+      if (hostId && createdAt !== null && updatedAt !== null && expiresAt !== null) {
+        const migratedGameId = createGameId(now)
+        const migratedMeta: RoomMeta = {
+          roomId: roomIdValue,
+          hostId,
+          expectedPlayers: Math.max(2, Math.trunc(asNumber(rawMeta.expectedPlayers) ?? 2)),
+          currentGameId: migratedGameId,
+          actionsVersion: Math.max(0, Math.trunc(asNumber(rawMeta.actionsVersion) ?? 0)),
+          dealerSeat: Math.max(0, Math.trunc(asNumber(rawMeta.dealerSeat) ?? 0)),
+          createdAt,
+          updatedAt,
+          expiresAt,
+          status: parseStatus(rawMeta.status)
+        }
+        meta = migratedMeta
+        await client.requestJson(`${withRoomPath(roomId)}/meta`, {
+          method: 'PATCH',
+          body: { currentGameId: migratedGameId, actionsVersion: migratedMeta.actionsVersion }
+        })
+      }
+    }
+    return meta
+  }
+
+  const fetchMeta = async (roomId: string): Promise<RoomMeta | null> => {
+    const rawMeta = await client.requestJson<unknown>(`${withRoomPath(roomId)}/meta`)
+    return parseAndMaybeMigrateMeta(roomId, rawMeta)
+  }
+
+  const fetchParticipants = async (roomId: string): Promise<ParticipantPresence[]> => {
+    const rawParticipants = await client.requestJson<unknown>(`${withRoomPath(roomId)}/participants`)
+    return parseParticipants(rawParticipants)
+  }
+
+  const fetchActions = async (roomId: string, activeGameId: string | null): Promise<ActionRecord[]> => {
+    const rawActions = await client.requestJson<unknown>(`${withRoomPath(roomId)}/actions`)
+    return parseActionRecords(rawActions, activeGameId)
+  }
+
+  const fetchPersistedGameState = async (roomId: string): Promise<GameState | null> => {
+    const rawGameState = await client.requestJson<unknown>(`${withRoomPath(roomId)}/gameState`)
+    return parseGameState(rawGameState)
+  }
 
   const refreshDirectory = async (roomId: string): Promise<void> => {
-    const snapshot = await fetchRoomSnapshot(roomId)
+    const snapshot = await fetchRoomSnapshot(roomId, {
+      includeParticipants: true,
+      includeActions: false,
+      includeGameState: false
+    })
     const currentTime = now()
     if (!snapshot.meta) return
     const participants = snapshot.participants
@@ -384,43 +453,47 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     })
   }
 
-  const fetchRoomSnapshot = async (roomId: string): Promise<RoomSnapshot> => {
-    const roomNode = await client.requestJson<unknown>(withRoomPath(roomId))
-    if (!isRecord(roomNode)) {
-      return { roomId: roomKey(roomId), meta: null, participants: [], actions: [], gameState: null }
-    }
-    const rawMeta = roomNode.meta
-    let meta = parseMeta(rawMeta)
-    if (!meta && isRecord(rawMeta)) {
-      const roomIdValue = asString(rawMeta.roomId) ?? roomKey(roomId)
-      const hostId = asString(rawMeta.hostId)
-      const createdAt = asNumber(rawMeta.createdAt)
-      const updatedAt = asNumber(rawMeta.updatedAt)
-      const expiresAt = asNumber(rawMeta.expiresAt)
-      if (hostId && createdAt !== null && updatedAt !== null && expiresAt !== null) {
-        const migratedGameId = createGameId(now)
-        const migratedMeta: RoomMeta = {
-          roomId: roomIdValue,
-          hostId,
-          expectedPlayers: Math.max(2, Math.trunc(asNumber(rawMeta.expectedPlayers) ?? 2)),
-          currentGameId: migratedGameId,
-          dealerSeat: Math.max(0, Math.trunc(asNumber(rawMeta.dealerSeat) ?? 0)),
-          createdAt,
-          updatedAt,
-          expiresAt,
-          status: parseStatus(rawMeta.status)
-        }
-        meta = migratedMeta
-        await client.requestJson(`${withRoomPath(roomId)}/meta`, { method: 'PATCH', body: { currentGameId: migratedGameId } })
-      }
-    }
+  const fetchRoomSnapshot = async (
+    roomId: string,
+    options?: { includeParticipants?: boolean; includeActions?: boolean; includeGameState?: boolean }
+  ): Promise<RoomSnapshot> => {
+    const includeParticipants = options?.includeParticipants ?? true
+    const includeActions = options?.includeActions ?? true
+    const includeGameState = options?.includeGameState ?? true
+    const meta = await fetchMeta(roomId)
+    const participants = includeParticipants ? await fetchParticipants(roomId) : []
+    const actions = includeActions ? await fetchActions(roomId, meta?.currentGameId ?? null) : []
+    const gameState = includeGameState ? await fetchPersistedGameState(roomId) : null
+
     return {
       roomId: roomKey(roomId),
       meta,
-      participants: parseParticipants(roomNode.participants),
-      actions: parseActionRecords(roomNode.actions, meta?.currentGameId ?? null),
-      gameState: parseGameState(roomNode.gameState)
+      participants,
+      actions,
+      gameState,
+      gameStateIncluded: includeGameState
     }
+  }
+
+  const maybeRefreshLiveness = async (roomId: string, currentTime: number): Promise<void> => {
+    const lastRefresh = lastLivenessRefreshByRoom.get(roomId) ?? 0
+    if (currentTime - lastRefresh < PRESENCE_LIVENESS_REFRESH_MS) return
+    lastLivenessRefreshByRoom.set(roomId, currentTime)
+    const expiresAt = currentTime + ROOM_TTL_MS
+    await client.requestJson(`${withRoomPath(roomId)}/meta`, {
+      method: 'PATCH',
+      body: {
+        updatedAt: currentTime,
+        expiresAt
+      } satisfies Partial<RoomMeta>
+    })
+    await client.requestJson(withDirectoryPath(roomId), {
+      method: 'PATCH',
+      body: {
+        updatedAt: currentTime,
+        expiresAt
+      } satisfies Partial<RoomDirectoryEntry>
+    })
   }
 
   const createRoom = async (input: {
@@ -445,6 +518,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
       hostId: input.hostId,
       expectedPlayers,
       currentGameId: createGameId(now),
+      actionsVersion: 0,
       dealerSeat: 0,
       createdAt: currentTime,
       updatedAt: currentTime,
@@ -497,7 +571,11 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     role: RoomRole
   }): Promise<RoomSnapshot> => {
     const normalizedRoom = roomKey(input.roomId)
-    const snapshot = await fetchRoomSnapshot(normalizedRoom)
+    const snapshot = await fetchRoomSnapshot(normalizedRoom, {
+      includeParticipants: true,
+      includeActions: false,
+      includeGameState: false
+    })
     if (!snapshot.meta) {
       // First connector bootstraps the room when metadata is missing.
       return createRoom({
@@ -535,7 +613,11 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     expectedPlayers?: number
   }): Promise<RoomSnapshot> => {
     const normalizedRoom = roomKey(input.roomId)
-    const snapshot = await fetchRoomSnapshot(normalizedRoom)
+    const snapshot = await fetchRoomSnapshot(normalizedRoom, {
+      includeParticipants: false,
+      includeActions: false,
+      includeGameState: false
+    })
     if (!snapshot.meta) {
       return createRoom({
         roomId: normalizedRoom,
@@ -578,6 +660,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
           hostId: input.hostId,
           expectedPlayers,
           currentGameId,
+          actionsVersion: 0,
           dealerSeat: 0,
           status: 'waiting',
           updatedAt: currentTime,
@@ -609,7 +692,11 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
 
   const resetRoundSession = async (input: { roomId: string; expectedGameId?: string }): Promise<RoomSnapshot> => {
     const normalizedRoom = roomKey(input.roomId)
-    const snapshot = await fetchRoomSnapshot(normalizedRoom)
+    const snapshot = await fetchRoomSnapshot(normalizedRoom, {
+      includeParticipants: true,
+      includeActions: false,
+      includeGameState: true
+    })
     if (!snapshot.meta) {
       throw new Error(`Room "${normalizedRoom}" does not exist.`)
     }
@@ -670,6 +757,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
         hostId: hostPlayer.id,
         expectedPlayers,
         currentGameId,
+        actionsVersion: 0,
         dealerSeat: nextDealerSeat,
         status: 'waiting',
         updatedAt: currentTime,
@@ -690,7 +778,11 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     await client.requestJson(`${withRoomPath(normalizedRoom)}/participants/${toFirebaseKey(playerId)}`, {
       method: 'DELETE'
     })
-    const snapshot = await fetchRoomSnapshot(normalizedRoom)
+    const snapshot = await fetchRoomSnapshot(normalizedRoom, {
+      includeParticipants: true,
+      includeActions: false,
+      includeGameState: false
+    })
     if (!snapshot.meta) return
     if (snapshot.participants.length === 0) {
       await client.requestJson(withRoomPath(normalizedRoom), { method: 'DELETE' })
@@ -705,21 +797,21 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     playerId: string
     playerName: string
     role: RoomRole
+    joinedAt?: number
     pingToken?: string
     pingAt?: number
     ackForPeerPingToken?: string
     ackAt?: number
   }): Promise<void> => {
     const normalizedRoom = roomKey(input.roomId)
-    const snapshot = await fetchRoomSnapshot(normalizedRoom)
-    if (!snapshot.meta) return
-    const existing = snapshot.participants.find((participant) => participant.playerId === input.playerId)
+    const meta = await fetchMeta(normalizedRoom)
+    if (!meta) return
     const currentTime = now()
     const presence = buildPresenceUpdate({
       playerId: input.playerId,
       playerName: input.playerName,
       role: input.role,
-      joinedAt: existing?.joinedAt ?? currentTime,
+      joinedAt: input.joinedAt ?? currentTime,
       lastSeenAt: currentTime,
       pingToken: input.pingToken,
       pingAt: input.pingAt,
@@ -730,15 +822,15 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
       method: 'PATCH',
       body: presence
     })
-    await refreshDirectory(normalizedRoom)
+    await maybeRefreshLiveness(normalizedRoom, currentTime)
   }
 
   const upsertGameState = async (roomId: string, state: GameState, expectedGameId?: string): Promise<boolean> => {
     const normalizedRoom = roomKey(roomId)
     if (expectedGameId) {
-      const snapshot = await fetchRoomSnapshot(normalizedRoom)
-      if (!snapshot.meta) return false
-      if (snapshot.meta.currentGameId !== expectedGameId) return false
+      const meta = await fetchMeta(normalizedRoom)
+      if (!meta) return false
+      if (meta.currentGameId !== expectedGameId) return false
     }
     await client.requestJson(`${withRoomPath(normalizedRoom)}/gameState`, {
       method: 'PUT',
@@ -760,15 +852,15 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     expectedGameId?: string
   }): Promise<ActionRecord | null> => {
     const normalizedRoom = roomKey(input.roomId)
-    const snapshot = await fetchRoomSnapshot(normalizedRoom)
-    if (!snapshot.meta) {
+    const meta = await fetchMeta(normalizedRoom)
+    if (!meta) {
       throw new Error(`Room "${normalizedRoom}" does not exist.`)
     }
-    if (input.expectedGameId && snapshot.meta.currentGameId !== input.expectedGameId) {
+    if (input.expectedGameId && meta.currentGameId !== input.expectedGameId) {
       // Stale action for a prior round/session; ignore.
       return null
     }
-    const gameId = snapshot.meta.currentGameId
+    const gameId = meta.currentGameId
     const actionId = toFirebaseKey(input.action.id)
     const actionKey = toFirebaseKey(`${gameId}__${actionId}`)
     const existing = await client.requestJson<unknown>(
@@ -781,7 +873,12 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
       method: 'PUT',
       body: record
     })
-    await refreshDirectory(normalizedRoom)
+    await client.requestJson(`${withRoomPath(normalizedRoom)}/meta`, {
+      method: 'PATCH',
+      body: {
+        actionsVersion: (meta.actionsVersion ?? 0) + 1
+      } satisfies Partial<RoomMeta>
+    })
     return record
   }
 
@@ -820,10 +917,67 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     handlers: { onUpdate: (snapshot: RoomSnapshot) => void; onError?: (error: Error) => void }
   ): (() => void) => {
     let active = true
+    let pollCount = 0
+    let cachedParticipants: ParticipantPresence[] = []
+    let cachedActions: ActionRecord[] = []
+    let cachedGameState: GameState | null = null
+    let cachedGameId: string | null = null
+    let cachedActionsVersion = -1
+
     const run = async () => {
       if (!active) return
       try {
-        const snapshot = await fetchRoomSnapshot(roomId)
+        const includeGameState = pollCount === 0 || pollCount % SNAPSHOT_GAME_STATE_REFRESH_POLLS === 0
+        const includeParticipants = pollCount === 0 || pollCount % SNAPSHOT_PARTICIPANTS_REFRESH_POLLS === 0
+        const includeActionsRefresh = pollCount === 0 || pollCount % SNAPSHOT_ACTIONS_REFRESH_POLLS === 0
+        pollCount += 1
+        const meta = await fetchMeta(roomId)
+        if (!meta) {
+          cachedParticipants = []
+          cachedActions = []
+          cachedGameState = null
+          cachedGameId = null
+          cachedActionsVersion = -1
+          const snapshot: RoomSnapshot = {
+            roomId: roomKey(roomId),
+            meta: null,
+            participants: [],
+            actions: [],
+            gameState: null,
+            gameStateIncluded: includeGameState
+          }
+          if (!active) return
+          handlers.onUpdate(snapshot)
+          return
+        }
+
+        if (includeParticipants || cachedParticipants.length === 0) {
+          cachedParticipants = await fetchParticipants(roomId)
+        }
+
+        const shouldFetchActions =
+          includeActionsRefresh ||
+          cachedActions.length === 0 ||
+          cachedGameId !== meta.currentGameId ||
+          cachedActionsVersion !== meta.actionsVersion
+        if (shouldFetchActions) {
+          cachedActions = await fetchActions(roomId, meta.currentGameId)
+          cachedGameId = meta.currentGameId
+          cachedActionsVersion = meta.actionsVersion
+        }
+
+        if (includeGameState) {
+          cachedGameState = await fetchPersistedGameState(roomId)
+        }
+
+        const snapshot: RoomSnapshot = {
+          roomId: roomKey(roomId),
+          meta,
+          participants: cachedParticipants,
+          actions: cachedActions,
+          gameState: includeGameState ? cachedGameState : null,
+          gameStateIncluded: includeGameState
+        }
         if (!active) return
         handlers.onUpdate(snapshot)
       } catch (error) {

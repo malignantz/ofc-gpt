@@ -358,6 +358,7 @@ export default function App() {
             playerId: localPlayerId,
             playerName,
             role: roomRole,
+            joinedAt: participantMap[localPlayerId]?.joinedAt,
             pingToken: latestPingTokenRef.current || undefined,
             pingAt: latestPingAtRef.current || undefined,
             ackForPeerPingToken: peerPresence.pingToken,
@@ -400,7 +401,7 @@ export default function App() {
         }
         actionCounter.value = seedActionCounterFromLog(resolvedState.actionLog, localPlayerId, actionCounter.value)
         setState(resolvedState)
-        if (!snapshot.gameState) {
+        if (snapshot.gameStateIncluded && !snapshot.gameState) {
           void roomStore
             .upsertGameState(snapshot.roomId, resolvedState, snapshot.meta?.currentGameId)
             .catch(() => undefined)
@@ -750,6 +751,7 @@ export default function App() {
           playerId: localPlayerId,
           playerName,
           role: roomRole,
+          joinedAt: participantPresenceById[localPlayerId]?.joinedAt,
           pingToken,
           pingAt,
           ackForPeerPingToken: acknowledgedPeerPingRef.current || undefined,
@@ -762,7 +764,7 @@ export default function App() {
     void heartbeat()
     const timerId = window.setInterval(heartbeat, HEARTBEAT_MS)
     return () => window.clearInterval(timerId)
-  }, [localPlayerId, playerName, roomRole, roomSlug, roomStore])
+  }, [localPlayerId, participantPresenceById, playerName, roomRole, roomSlug, roomStore])
 
   useEffect(() => {
     if (autoJoinRef.current) return
