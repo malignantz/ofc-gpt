@@ -682,7 +682,7 @@ export default function App() {
   }, [scoreboardOpen])
 
   useEffect(() => {
-    if (!scoreboardOpen && !rulesOpen) return
+    if (!scoreboardOpen && !rulesOpen && !settingsOpen) return
     if (typeof window === 'undefined') return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -692,12 +692,16 @@ export default function App() {
         }
         if (scoreboardOpen) {
           setScoreboardOpen(false)
+          return
+        }
+        if (settingsOpen) {
+          setSettingsOpen(false)
         }
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [rulesOpen, scoreboardOpen])
+  }, [rulesOpen, scoreboardOpen, settingsOpen])
 
   useEffect(() => {
     roomSlugRef.current = roomSlug
@@ -1069,6 +1073,7 @@ export default function App() {
             className="button secondary"
             onClick={() => {
               setScoreboardOpen(false)
+              setSettingsOpen(false)
               setRulesOpen(true)
             }}
           >
@@ -1081,12 +1086,20 @@ export default function App() {
                 setScoreboardEntries(readScoreboardEntriesFromLocalStorage(window.localStorage))
               }
               setRulesOpen(false)
+              setSettingsOpen(false)
               setScoreboardOpen(true)
             }}
           >
             Scoreboard
           </button>
-          <button className="button secondary" onClick={() => setSettingsOpen((open) => !open)}>
+          <button
+            className="button secondary"
+            onClick={() => {
+              setRulesOpen(false)
+              setScoreboardOpen(false)
+              setSettingsOpen((open) => !open)
+            }}
+          >
             Settings
           </button>
         </div>
@@ -1161,26 +1174,34 @@ export default function App() {
       )}
 
       {settingsOpen && (
-        <section className="panel settings-panel">
-          <div className="settings-header">
-            <h3>Settings</h3>
-            <button className="settings-close" onClick={() => setSettingsOpen(false)} aria-label="Close settings">
-              &times;
-            </button>
-          </div>
-          <label className="setting-field">
-            <span>Player Name</span>
-            <input value={playerName} onChange={(event) => setPlayerName(event.target.value)} />
-          </label>
-          <label className="setting-row">
-            <input type="checkbox" checked={fourColorDeck} onChange={(event) => setFourColorDeck(event.target.checked)} />
-            4-Color Deck
-          </label>
-          <label className="setting-row">
-            <input type="checkbox" checked={hideSubmitButton} onChange={(event) => setHideSubmitButton(event.target.checked)} />
-            Hide Submit Button (initial)
-          </label>
-        </section>
+        <div className="modal-backdrop" onClick={() => setSettingsOpen(false)} role="presentation">
+          <section
+            className="panel settings-panel settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Settings"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="settings-header">
+              <h3>Settings</h3>
+              <button className="settings-close" onClick={() => setSettingsOpen(false)} aria-label="Close settings">
+                &times;
+              </button>
+            </div>
+            <label className="setting-field">
+              <span>Player Name</span>
+              <input value={playerName} onChange={(event) => setPlayerName(event.target.value)} />
+            </label>
+            <label className="setting-row">
+              <input type="checkbox" checked={fourColorDeck} onChange={(event) => setFourColorDeck(event.target.checked)} />
+              4-Color Deck
+            </label>
+            <label className="setting-row">
+              <input type="checkbox" checked={hideSubmitButton} onChange={(event) => setHideSubmitButton(event.target.checked)} />
+              Hide Submit Button (initial)
+            </label>
+          </section>
+        </div>
       )}
 
       {syncError && (

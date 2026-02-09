@@ -1,3 +1,5 @@
+import { byteLengthUtf8, describePayload, logTransportUsage } from '../utils/transportUsage'
+
 type EnvLike = Record<string, string | undefined>
 
 export type FirebaseConfig = {
@@ -53,25 +55,49 @@ export function createFirebaseRestClient(config: FirebaseConfig | null = readFir
 
     const method = options?.method ?? 'GET'
     const url = `${baseUrl}${normalizePath(path)}`
+    const normalizedPath = normalizePath(path).replace(/\.json$/, '')
+    const bodyText = options?.body !== undefined && method !== 'GET' ? JSON.stringify(options.body) : undefined
     const init: RequestInit = {
       method,
       signal: options?.signal,
       headers: { 'Content-Type': 'application/json' }
     }
-    if (options?.body !== undefined && method !== 'GET') {
-      init.body = JSON.stringify(options.body)
+    if (bodyText !== undefined) {
+      init.body = bodyText
     }
+    logTransportUsage({
+      channel: 'firebase',
+      direction: 'outbound',
+      description: `${method} ${normalizedPath} request (${bodyText ? describePayload(options?.body) : 'no-body'})`,
+      bytes: bodyText ? byteLengthUtf8(bodyText) : 0
+    })
 
     const response = await fetch(url, init)
+    const text = response.status === 204 ? '' : await response.text()
+    const parsedResponse = parseJsonIfPossible(text)
+    logTransportUsage({
+      channel: 'firebase',
+      direction: 'inbound',
+      description: `${method} ${normalizedPath} response (${response.status}, ${describePayload(parsedResponse ?? text)})`,
+      bytes: byteLengthUtf8(text)
+    })
     if (!response.ok) {
       throw new Error(`Firebase request failed (${response.status}) for ${method} ${url}`)
     }
     if (response.status === 204) return null as T
 
-    const text = await response.text()
     if (!text) return null as T
     return JSON.parse(text) as T
   }
 
   return { isConfigured, baseUrl, requestJson }
+}
+
+function parseJsonIfPossible(text: string): unknown | null {
+  if (!text) return null
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return null
+  }
 }

@@ -1,3 +1,5 @@
+import { byteLengthUtf8, describePayload, describeSignalMessage, logTransportUsage } from '../utils/transportUsage'
+
 export type SignalMessage =
   | { type: 'createRoom'; roomId: string; clientId: string }
   | { type: 'joinRoom'; roomId: string; clientId: string }
@@ -27,12 +29,29 @@ export class SignalingClient {
     this.socket = new WebSocket(url.toString())
     this.socket.onopen = () => {
       console.debug('[signal] open', url.toString())
-      this.queue.forEach((message) => this.socket?.send(JSON.stringify(message)))
+      this.queue.forEach((message) => {
+        const serialized = JSON.stringify(message)
+        this.socket?.send(serialized)
+        logTransportUsage({
+          channel: 'signaling',
+          direction: 'outbound',
+          description: `queued ${describeSignalMessage(message)}`,
+          bytes: byteLengthUtf8(serialized)
+        })
+      })
       this.queue = []
     }
     this.socket.onmessage = (event) => {
       console.debug('[signal] message', event.data)
-      onEvent(JSON.parse(event.data) as SignalEvent)
+      if (typeof event.data !== 'string') return
+      const parsedEvent = JSON.parse(event.data) as SignalEvent
+      logTransportUsage({
+        channel: 'signaling',
+        direction: 'inbound',
+        description: describeSignalEvent(parsedEvent),
+        bytes: byteLengthUtf8(event.data)
+      })
+      onEvent(parsedEvent)
     }
     this.socket.onerror = () => {
       console.warn('[signal] error')
@@ -48,7 +67,14 @@ export class SignalingClient {
   send(message: SignalMessage) {
     if (this.socket?.readyState === WebSocket.OPEN) {
       console.debug('[signal] send', message.type)
-      this.socket.send(JSON.stringify(message))
+      const serialized = JSON.stringify(message)
+      this.socket.send(serialized)
+      logTransportUsage({
+        channel: 'signaling',
+        direction: 'outbound',
+        description: describeSignalMessage(message),
+        bytes: byteLengthUtf8(serialized)
+      })
     } else {
       console.debug('[signal] queue', message.type)
       this.queue.push(message)
@@ -65,4 +91,23 @@ export class SignalingClient {
     this.socket = undefined
     this.queue = []
   }
+}
+
+function describeSignalEvent(event: SignalEvent): string {
+  if (event.type === 'signal') {
+    return `signal from ${event.fromId} (${describePayload(event.payload)})`
+  }
+  if (event.type === 'relay') {
+    return `relay from ${event.fromId} (${describePayload(event.payload)})`
+  }
+  if (event.type === 'peerList') {
+    return `peerList (${event.clientIds.length} peers)`
+  }
+  if (event.type === 'peerJoined') {
+    return `peerJoined ${event.clientId}`
+  }
+  if (event.type === 'roomCreated') {
+    return `roomCreated ${event.roomId}`
+  }
+  return `error (${event.message})`
 }

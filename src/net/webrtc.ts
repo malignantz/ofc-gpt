@@ -1,3 +1,5 @@
+import { describePayload, estimatePayloadBytes, logTransportUsage } from '../utils/transportUsage'
+
 export type PeerConnection = {
   id: string
   connection: RTCPeerConnection
@@ -119,17 +121,35 @@ export class MeshNetwork {
 
   broadcast(data: unknown) {
     const message = JSON.stringify(data)
+    let deliveredCount = 0
     this.peers.forEach((peer) => {
       if (peer.dataChannel?.readyState === 'open') {
         peer.dataChannel.send(message)
+        deliveredCount += 1
       }
     })
+    if (deliveredCount > 0) {
+      logTransportUsage({
+        channel: 'webrtc',
+        direction: 'outbound',
+        description: `broadcast ${describePayload(data)} to ${deliveredCount} peer(s)`,
+        bytes: estimatePayloadBytes(message) ?? 0,
+        requestCount: deliveredCount
+      })
+    }
   }
 
   sendTo(peerId: string, data: unknown): boolean {
     const peer = this.peers.get(peerId)
     if (peer?.dataChannel?.readyState === 'open') {
-      peer.dataChannel.send(JSON.stringify(data))
+      const message = JSON.stringify(data)
+      peer.dataChannel.send(message)
+      logTransportUsage({
+        channel: 'webrtc',
+        direction: 'outbound',
+        description: `direct ${describePayload(data)} to ${peerId}`,
+        bytes: estimatePayloadBytes(message) ?? 0
+      })
       return true
     }
     return false
@@ -160,12 +180,24 @@ export class MeshNetwork {
     const channel = peer.dataChannel
     if (!channel) return
     channel.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data)
-        this.events.onPeerData(peer.id, parsed)
-      } catch {
-        this.events.onPeerData(peer.id, event.data)
+      let parsed: unknown = event.data
+      if (typeof event.data === 'string') {
+        try {
+          parsed = JSON.parse(event.data)
+        } catch {
+          parsed = event.data
+        }
       }
+      const bytes = estimatePayloadBytes(event.data)
+      if (bytes !== null) {
+        logTransportUsage({
+          channel: 'webrtc',
+          direction: 'inbound',
+          description: `from ${peer.id} (${describePayload(parsed)})`,
+          bytes
+        })
+      }
+      this.events.onPeerData(peer.id, parsed)
     }
   }
 
