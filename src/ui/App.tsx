@@ -28,12 +28,25 @@ const HEARTBEAT_MS = 10_000
 const PEER_PING_TIMEOUT_MS = HEARTBEAT_MS * 3
 const PEER_ACK_TIMEOUT_MS = HEARTBEAT_MS * 4
 const BOOTSTRAP_WARNING_GRACE_MS = 8_000
+const DEFAULT_PLAYER_NAMES = ['Bert', 'Ernie', 'Elmo', 'Oscar', 'Cookie Monster', 'Big Bird'] as const
 
 function generatePlayerId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return `p-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
   }
   return `p-${Math.random().toString(36).slice(2, 14)}`
+}
+
+function randomDefaultPlayerName(): string {
+  const names = DEFAULT_PLAYER_NAMES
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const random = new Uint32Array(1)
+    crypto.getRandomValues(random)
+    const index = (random[0] ?? 0) % names.length
+    return names[index] ?? names[0]
+  }
+  const index = Math.floor(Math.random() * names.length)
+  return names[index] ?? names[0]
 }
 
 function getOrCreateLocalPlayerId(): string {
@@ -51,12 +64,15 @@ function getOrCreateLocalPlayerId(): string {
 }
 
 function readLocalPlayerName(): string {
-  if (typeof window === 'undefined') return 'You'
+  const fallback = randomDefaultPlayerName()
+  if (typeof window === 'undefined') return fallback
   try {
     const stored = window.localStorage.getItem(LOCAL_PLAYER_NAME_KEY)
-    return stored && stored.trim().length > 0 ? stored : 'You'
+    const normalized = stored?.trim() ?? ''
+    if (normalized.length > 0 && normalized !== 'You') return normalized
+    return fallback
   } catch {
-    return 'You'
+    return fallback
   }
 }
 
