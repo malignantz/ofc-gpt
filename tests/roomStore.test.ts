@@ -94,7 +94,7 @@ class FakeFirebaseClient implements FirebaseRestClient {
 }
 
 describe('roomStore helpers', () => {
-  it('filters directory by expiry and sorts by updatedAt descending', () => {
+  it('filters directory by expiry/joinability and sorts by updatedAt descending', () => {
     const entries: RoomDirectoryEntry[] = [
       {
         roomId: 'old',
@@ -117,11 +117,22 @@ describe('roomStore helpers', () => {
         updatedAt: 100,
         expiresAt: 500,
         discoverable: true
+      },
+      {
+        roomId: 'open',
+        displayName: 'Open',
+        hostName: 'Host',
+        status: 'waiting',
+        playerCount: 1,
+        expectedPlayers: 2,
+        updatedAt: 120,
+        expiresAt: 500,
+        discoverable: true
       }
     ]
 
     const filtered = filterActiveRoomDirectory(entries, 30)
-    expect(filtered.map((entry) => entry.roomId)).toEqual(['fresh'])
+    expect(filtered.map((entry) => entry.roomId)).toEqual(['open'])
   })
 
   it('builds normalized presence payload', () => {

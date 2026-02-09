@@ -307,6 +307,7 @@ function parseDirectoryEntry(value: unknown): RoomDirectoryEntry | null {
 export function filterActiveRoomDirectory(entries: RoomDirectoryEntry[], now: number): RoomDirectoryEntry[] {
   return [...entries]
     .filter((entry) => entry.discoverable && entry.expiresAt > now)
+    .filter((entry) => entry.playerCount < entry.expectedPlayers)
     .sort((left, right) => right.updatedAt - left.updatedAt)
     .slice(0, 20)
 }
