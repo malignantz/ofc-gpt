@@ -30,7 +30,6 @@ export function Lobby({
     <section className="panel lobby-panel">
       <header className="lobby-head">
         <h2>Lobby</h2>
-        <p className="lobby-intro">Join an active room or launch a new one.</p>
       </header>
 
       <div className="lobby-focus">

@@ -36,10 +36,11 @@ body {
 .app {
   min-height: 100vh;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto;
+  align-content: start;
   padding: var(--space-4);
   gap: var(--space-3);
-  max-width: 980px;
+  max-width: 860px;
   margin: 0 auto;
 }
 
@@ -81,6 +82,14 @@ body {
   border-radius: var(--radius-lg);
   padding: var(--space-4);
   box-shadow: var(--shadow-soft);
+}
+
+.lobby-panel,
+.hydrate-panel,
+.sync-error-panel {
+  width: 100%;
+  max-width: 760px;
+  margin-inline: auto;
 }
 
 .lobby-panel {
@@ -1100,12 +1109,5 @@ select {
     width: 34px;
     height: 48px;
     font-size: 11px;
-  }
-}
-
-@media (min-width: 780px) {
-  .lobby-focus {
-    grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
-    align-items: start;
   }
 }
