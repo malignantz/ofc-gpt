@@ -248,6 +248,20 @@ function parseGameState(value: unknown): GameState | null {
   if (!isRecord(value)) return null
   if (!Array.isArray(value.players)) return null
   if (!Array.isArray(value.actionLog)) return null
+  if (!isRecord(value.lines)) return null
+  if (!isRecord(value.pending)) return null
+  if (!isRecord(value.commits)) return null
+  if (!isRecord(value.reveals)) return null
+  if (!Array.isArray(value.deck)) return null
+  if (!Array.isArray(value.drawOrder)) return null
+  if (value.phase !== 'lobby' && value.phase !== 'commit' && value.phase !== 'reveal' && value.phase !== 'initial' && value.phase !== 'play' && value.phase !== 'score') {
+    return null
+  }
+  const drawIndex = asNumber(value.drawIndex)
+  const dealerSeat = asNumber(value.dealerSeat)
+  const turnSeat = asNumber(value.turnSeat)
+  if (drawIndex === null || dealerSeat === null || turnSeat === null) return null
+  if (value.turnStage !== 'draw' && value.turnStage !== 'place') return null
   return value as unknown as GameState
 }
 

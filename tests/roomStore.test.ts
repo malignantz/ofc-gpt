@@ -343,4 +343,31 @@ describe('roomStore action writes', () => {
     expect(snapshot.meta?.hostId).toBe('p-host')
     expect(snapshot.participants.some((participant) => participant.playerId === 'p-host')).toBe(true)
   })
+
+  it('rejects malformed persisted gameState payloads to prevent client crashes', async () => {
+    const client = new FakeFirebaseClient()
+    const store = createRoomStore({
+      client,
+      now: () => 100
+    })
+
+    await store.createRoom({
+      roomId: 'table-bad-state',
+      displayName: 'table-bad-state',
+      hostId: 'p1',
+      hostName: 'Host',
+      expectedPlayers: 2
+    })
+
+    await client.requestJson('/rooms/table-bad-state/gameState', {
+      method: 'PUT',
+      body: {
+        players: [{ id: 'p1', name: 'Host', seat: 0, connected: true, ready: false }],
+        actionLog: []
+      }
+    })
+
+    const snapshot = await store.fetchRoomSnapshot('table-bad-state')
+    expect(snapshot.gameState).toBeNull()
+  })
 })
