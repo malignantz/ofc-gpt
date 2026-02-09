@@ -175,7 +175,7 @@ describe('database sync integration', () => {
     await store.upsertGameState('sync-round-restart', {
       ...beforeRestart.gameState,
       phase: 'score'
-    })
+    }, beforeRestart.meta.currentGameId)
     const scoredSnapshot = await store.fetchRoomSnapshot('sync-round-restart')
     const gameIdBeforeRestart = scoredSnapshot.meta?.currentGameId
     if (!gameIdBeforeRestart) throw new Error('Expected current game id before restart')
@@ -187,6 +187,7 @@ describe('database sync integration', () => {
     const restartedGameId = restartSnapshot.meta?.currentGameId
     if (!restartedGameId) throw new Error('Expected current game id after restart')
     expect(restartedGameId).not.toBe(gameIdBeforeRestart)
+    expect(restartSnapshot.meta?.dealerSeat).toBe(1)
     expect(restartSnapshot.gameState?.phase).toBe('lobby')
     expect(restartSnapshot.gameState?.dealerSeat).toBe(1)
     expect(restartSnapshot.gameState?.turnSeat).toBe(0)

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { buildDeck } from '../src/engine/deck'
 import { dealClassicOFC } from '../src/engine/deal'
 import { stringToCard } from '../src/engine/cards'
-import { isFoul } from '../src/engine/validation'
+import { analyzeFoul, isFoul } from '../src/engine/validation'
 import { royaltiesBottom, royaltiesMiddle, royaltiesTop, scoreHeadsUp, scoreHeadsUpDetailed } from '../src/engine/scoring'
 
 const seed = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
@@ -58,6 +58,32 @@ describe('foul detection', () => {
     })
 
     expect(foul).toBe(true)
+  })
+
+  it('identifies middle as offending when top outranks middle', () => {
+    const analysis = analyzeFoul({
+      top: ['AS', 'AD', '2C'].map(stringToCard),
+      middle: ['2S', '4D', '6C', '8H', '9S'].map(stringToCard),
+      bottom: ['7S', '8D', '9C', 'TH', 'JS'].map(stringToCard)
+    })
+
+    expect(analysis.isFoul).toBe(true)
+    expect(analysis.offenderLines).toEqual(['middle'])
+    expect(analysis.topBeatsMiddle).toBe(true)
+    expect(analysis.middleBeatsBottom).toBe(false)
+  })
+
+  it('identifies bottom as offending when middle outranks bottom', () => {
+    const analysis = analyzeFoul({
+      top: ['2S', '3D', '4C'].map(stringToCard),
+      middle: ['5H', '5D', '5C', '7H', '9S'].map(stringToCard),
+      bottom: ['2C', '3C', '5D', '7C', '9D'].map(stringToCard)
+    })
+
+    expect(analysis.isFoul).toBe(true)
+    expect(analysis.offenderLines).toEqual(['bottom'])
+    expect(analysis.topBeatsMiddle).toBe(false)
+    expect(analysis.middleBeatsBottom).toBe(true)
   })
 })
 

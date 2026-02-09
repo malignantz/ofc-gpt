@@ -410,10 +410,13 @@ body {
 .line-royalty {
   background: #1c1712;
   color: #fff;
-  border-radius: 999px;
-  font-size: 11px;
+  border-radius: 10px;
+  font-size: 10px;
   font-weight: 700;
-  padding: 2px 8px;
+  padding: 3px 8px;
+  line-height: 1.2;
+  max-width: 210px;
+  text-align: right;
 }
 
 .line-score-win {
@@ -482,6 +485,12 @@ body {
 .seat-opponent .line-label {
   font-size: 10px;
   margin-bottom: 2px;
+}
+
+.seat-opponent .line-royalty {
+  font-size: 9px;
+  padding: 2px 6px;
+  max-width: 170px;
 }
 
 /* ---------- Cards ---------- */

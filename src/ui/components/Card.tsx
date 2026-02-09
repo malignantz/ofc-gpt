@@ -7,6 +7,15 @@ const suitMap: Record<string, string> = {
   C: '♣'
 }
 
+export function formatCardDisplay(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  const suit = trimmed.slice(-1)
+  const rankRaw = trimmed.slice(0, -1)
+  const rank = rankRaw === 'T' ? '10' : rankRaw
+  return `${rank}${suitMap[suit] ?? suit}`
+}
+
 export type CardProps = {
   value: string
   draggable?: boolean
@@ -28,11 +37,7 @@ export function Card({
   size = 'normal',
   selected
 }: CardProps) {
-  const display = useMemo(() => {
-    const rank = value[0] ?? ''
-    const suit = value[1] ?? ''
-    return `${rank}${suitMap[suit] ?? suit}`
-  }, [value])
+  const display = useMemo(() => formatCardDisplay(value), [value])
 
   const suitClass = `suit-${value[1]?.toLowerCase() ?? ''}`
 

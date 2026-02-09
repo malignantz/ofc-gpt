@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type DragEvent } from 'react'
 import { useTransition, animated } from '@react-spring/web'
 import type { Card as PlayingCard } from '../../engine/cards'
 import { cardToString, stringToCard } from '../../engine/cards'
+import { evaluateFive, evaluateThree } from '../../engine/handEval'
+import { analyzeFoul, type FoulAnalysis } from '../../engine/validation'
 import { GameState, LinesState } from '../../state/gameState'
 import { royaltiesBreakdown, scoreHeadsUpDetailed, type HeadsUpDetailedResult } from '../../engine/scoring'
 import { RIVALRY_STORE_KEY } from '../utils/scoreboard'
@@ -306,6 +308,42 @@ export function GameTable({
     state.phase === 'score' && localLines
       ? royaltiesBreakdown(localLines)
       : { top: 0, middle: 0, bottom: 0, total: 0 }
+  const localRoyaltyTextByLine = useMemo(
+    () =>
+      buildRoyaltyTextByLine(localLines, {
+        top: localRoyalties.top,
+        middle: localRoyalties.middle,
+        bottom: localRoyalties.bottom
+      }),
+    [localLines, localRoyalties.bottom, localRoyalties.middle, localRoyalties.top]
+  )
+  const opponentRoyaltyTextById = useMemo(() => {
+    const map: Record<string, Record<keyof LinesState, string | null>> = {}
+    for (const opponent of opponents) {
+      const opponentLines = state.lines[opponent.id]
+      const points = matchupByOpponent[opponent.id]?.opponent.royaltiesByLine
+      map[opponent.id] = buildRoyaltyTextByLine(opponentLines, {
+        top: points?.top ?? 0,
+        middle: points?.middle ?? 0,
+        bottom: points?.bottom ?? 0
+      })
+    }
+    return map
+  }, [matchupByOpponent, opponents, state.lines])
+  const localFoulAnalysis = useMemo(() => {
+    if (!selectedMatchup?.fouls.player || !localLines) return null
+    return analyzeFoul(localLines)
+  }, [localLines, selectedMatchup?.fouls.player])
+  const opponentFoulAnalysisById = useMemo(() => {
+    const map: Record<string, FoulAnalysis | undefined> = {}
+    for (const opponent of opponents) {
+      if (!matchupByOpponent[opponent.id]?.fouls.opponent) continue
+      const opponentLines = state.lines[opponent.id]
+      if (!opponentLines) continue
+      map[opponent.id] = analyzeFoul(opponentLines)
+    }
+    return map
+  }, [matchupByOpponent, opponents, state.lines])
 
   const handleDrop = (event: DragEvent<HTMLDivElement>, target: keyof LinesState) => {
     event.preventDefault()
@@ -467,7 +505,7 @@ export function GameTable({
             <div className="seat-title">Your Hand</div>
           </div>
           <div className="seat-status">
-            {state.phase === 'score' && selectedMatchup?.fouls.player && <FoulBadge />}
+            {state.phase === 'score' && selectedMatchup?.fouls.player && <FoulBadge analysis={localFoulAnalysis} />}
             {state.phase === 'score' && selectedMatchup && (
               <div
                 className={`hand-result ${
@@ -514,7 +552,7 @@ export function GameTable({
             tapTargetState={selectedCard && tapPlacementMode ? (canTapPlaceOnLine('top') ? 'active' : 'blocked') : undefined}
             fourColor={fourColor}
             scoreTone={overlayTone(selectedMatchup?.lines.top, hasBonus(selectedMatchup?.player))}
-            royalty={localRoyalties.top}
+            royaltyText={localRoyaltyTextByLine.top}
             showScore={state.phase === 'score'}
           />
           <DropLine
@@ -530,7 +568,7 @@ export function GameTable({
             tapTargetState={selectedCard && tapPlacementMode ? (canTapPlaceOnLine('middle') ? 'active' : 'blocked') : undefined}
             fourColor={fourColor}
             scoreTone={overlayTone(selectedMatchup?.lines.middle, hasBonus(selectedMatchup?.player))}
-            royalty={localRoyalties.middle}
+            royaltyText={localRoyaltyTextByLine.middle}
             showScore={state.phase === 'score'}
           />
           <DropLine
@@ -546,7 +584,7 @@ export function GameTable({
             tapTargetState={selectedCard && tapPlacementMode ? (canTapPlaceOnLine('bottom') ? 'active' : 'blocked') : undefined}
             fourColor={fourColor}
             scoreTone={overlayTone(selectedMatchup?.lines.bottom, hasBonus(selectedMatchup?.player))}
-            royalty={localRoyalties.bottom}
+            royaltyText={localRoyaltyTextByLine.bottom}
             showScore={state.phase === 'score'}
           />
         </div>
@@ -618,7 +656,7 @@ export function GameTable({
                 </div>
                 <div className="seat-status">
                   {state.phase === 'score' && matchupByOpponent[player.id]?.fouls.opponent && (
-                    <FoulBadge />
+                    <FoulBadge analysis={opponentFoulAnalysisById[player.id]} />
                   )}
                   {state.phase === 'score' && matchupByOpponent[player.id] && (
                     <div
@@ -651,7 +689,7 @@ export function GameTable({
                     invertOutcome(matchupByOpponent[player.id]?.lines.top),
                     hasBonus(matchupByOpponent[player.id]?.opponent)
                   )}
-                  royalty={matchupByOpponent[player.id]?.opponent.royaltiesByLine.top ?? 0}
+                  royaltyText={opponentRoyaltyTextById[player.id]?.top ?? null}
                   showScore={state.phase === 'score'}
                 />
                 <Line
@@ -663,7 +701,7 @@ export function GameTable({
                     invertOutcome(matchupByOpponent[player.id]?.lines.middle),
                     hasBonus(matchupByOpponent[player.id]?.opponent)
                   )}
-                  royalty={matchupByOpponent[player.id]?.opponent.royaltiesByLine.middle ?? 0}
+                  royaltyText={opponentRoyaltyTextById[player.id]?.middle ?? null}
                   showScore={state.phase === 'score'}
                 />
                 <Line
@@ -675,7 +713,7 @@ export function GameTable({
                     invertOutcome(matchupByOpponent[player.id]?.lines.bottom),
                     hasBonus(matchupByOpponent[player.id]?.opponent)
                   )}
-                  royalty={matchupByOpponent[player.id]?.opponent.royaltiesByLine.bottom ?? 0}
+                  royaltyText={opponentRoyaltyTextById[player.id]?.bottom ?? null}
                   showScore={state.phase === 'score'}
                 />
               </div>
@@ -704,7 +742,7 @@ function Line({
   fourColor,
   size = 'normal',
   scoreTone,
-  royalty,
+  royaltyText,
   showScore
 }: {
   label: string
@@ -712,7 +750,7 @@ function Line({
   fourColor?: boolean
   size?: 'normal' | 'small'
   scoreTone?: 'win' | 'win-strong' | 'loss' | 'tie'
-  royalty?: number
+  royaltyText?: string | null
   showScore?: boolean
 }) {
   const lineClass = scoreTone ? `line line-score-${scoreTone}` : 'line'
@@ -720,7 +758,7 @@ function Line({
     <div className={lineClass}>
       <div className="line-header">
         <div className="line-label">{label}</div>
-        {showScore && (royalty ?? 0) > 0 && <div className="line-royalty">+{royalty}</div>}
+        {showScore && royaltyText ? <div className="line-royalty">{royaltyText}</div> : null}
       </div>
       <div className="cards">
         {cards.map((card) => (
@@ -744,7 +782,7 @@ function DropLine({
   tapTargetState,
   fourColor,
   scoreTone,
-  royalty,
+  royaltyText,
   showScore
 }: {
   label: string
@@ -759,7 +797,7 @@ function DropLine({
   tapTargetState?: 'active' | 'blocked'
   fourColor?: boolean
   scoreTone?: 'win' | 'win-strong' | 'loss' | 'tie'
-  royalty?: number
+  royaltyText?: string | null
   showScore?: boolean
 }) {
   const lineClass = `line drop${scoreTone ? ` line-score-${scoreTone}` : ''}${tapTargetState ? ` line-tap-${tapTargetState}` : ''}`
@@ -767,7 +805,7 @@ function DropLine({
     <div className={lineClass} onDrop={onDrop} onDragOver={onDragOver} onClick={onLineTap}>
       <div className="line-header">
         <div className="line-label">{label}</div>
-        {showScore && (royalty ?? 0) > 0 && <div className="line-royalty">+{royalty}</div>}
+        {showScore && royaltyText ? <div className="line-royalty">{royaltyText}</div> : null}
       </div>
       <div className="cards">
         {cards.map((card) => (
@@ -786,13 +824,13 @@ function DropLine({
   )
 }
 
-function FoulBadge() {
+function FoulBadge({ analysis }: { analysis?: FoulAnalysis | null }) {
   return (
-    <div className="foul-badge" title="Out of order (foul)">
+    <div className="foul-badge" title={foulBadgeTitle(analysis)}>
       <span className="foul-icon" aria-hidden="true">
         ⇅
       </span>
-      <span>Foul</span>
+      <span>{foulBadgeLabel(analysis)}</span>
     </div>
   )
 }
@@ -884,6 +922,77 @@ function invertOutcome(outcome: -1 | 0 | 1 | undefined): -1 | 0 | 1 | undefined 
 function formatSigned(value: number): string {
   if (value > 0) return `+${value}`
   return `${value}`
+}
+
+function buildRoyaltyTextByLine(
+  lines: LinesState | undefined,
+  pointsByLine: { top: number; middle: number; bottom: number }
+): Record<keyof LinesState, string | null> {
+  if (!lines) {
+    return { top: null, middle: null, bottom: null }
+  }
+  return {
+    top: formatRoyaltyText(pointsByLine.top, royaltyNameForLine('top', lines.top)),
+    middle: formatRoyaltyText(pointsByLine.middle, royaltyNameForLine('middle', lines.middle)),
+    bottom: formatRoyaltyText(pointsByLine.bottom, royaltyNameForLine('bottom', lines.bottom))
+  }
+}
+
+function formatRoyaltyText(points: number, name: string | null): string | null {
+  if (points <= 0) return null
+  if (!name) return `+${points}`
+  return `+${points} - ${name}`
+}
+
+function royaltyNameForLine(line: keyof LinesState, cards: PlayingCard[]): string | null {
+  try {
+    if (line === 'top') {
+      if (cards.length !== 3) return null
+      const hand = evaluateThree(cards)
+      if (hand.category === 2) return 'Three of a kind'
+      if (hand.category === 1) return 'One pair'
+      return null
+    }
+
+    if (cards.length !== 5) return null
+    const hand = evaluateFive(cards)
+    switch (hand.category) {
+      case 8:
+        return 'Straight flush'
+      case 7:
+        return 'Four of a kind'
+      case 6:
+        return 'Full house'
+      case 5:
+        return 'Flush'
+      case 4:
+        return 'Straight'
+      case 3:
+        return 'Three of a kind'
+      default:
+        return null
+    }
+  } catch {
+    return null
+  }
+}
+
+function foulBadgeLabel(analysis?: FoulAnalysis | null): string {
+  if (!analysis) return 'Foul'
+  if (analysis.incomplete) return 'Foul: Incomplete'
+  const offenders = analysis.offenderLines.map((line) => line.charAt(0).toUpperCase() + line.slice(1))
+  if (offenders.length === 0) return 'Foul'
+  if (offenders.length === 1) return `Foul: ${offenders[0]}`
+  return `Foul: ${offenders.join(' & ')}`
+}
+
+function foulBadgeTitle(analysis?: FoulAnalysis | null): string {
+  if (!analysis) return 'Out of order (foul)'
+  const reasons: string[] = []
+  if (analysis.incomplete) reasons.push('Hand is incomplete')
+  if (analysis.topBeatsMiddle) reasons.push('Top outranks middle (middle offending)')
+  if (analysis.middleBeatsBottom) reasons.push('Middle outranks bottom (bottom offending)')
+  return reasons.length > 0 ? reasons.join('; ') : 'Out of order (foul)'
 }
 
 function scoreClass(value: number): string {

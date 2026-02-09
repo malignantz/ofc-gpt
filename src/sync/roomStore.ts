@@ -28,6 +28,7 @@ export type RoomMeta = {
   hostId: string
   expectedPlayers: number
   currentGameId: string
+  dealerSeat: number
   createdAt: number
   updatedAt: number
   expiresAt: number
@@ -102,7 +103,7 @@ export type RoomStore = {
     expectedGameId?: string
   }) => Promise<ActionRecord | null>
   fetchRoomSnapshot: (roomId: string) => Promise<RoomSnapshot>
-  upsertGameState: (roomId: string, state: GameState) => Promise<void>
+  upsertGameState: (roomId: string, state: GameState, expectedGameId?: string) => Promise<boolean>
   subscribeRoomSnapshot: (
     roomId: string,
     handlers: { onUpdate: (snapshot: RoomSnapshot) => void; onError?: (error: Error) => void }
@@ -226,17 +227,20 @@ function parseMeta(value: unknown): RoomMeta | null {
   const roomId = asString(value.roomId)
   const hostId = asString(value.hostId)
   const currentGameId = asString(value.currentGameId)
+  const dealerSeatRaw = asNumber(value.dealerSeat)
   const createdAt = asNumber(value.createdAt)
   const updatedAt = asNumber(value.updatedAt)
   const expiresAt = asNumber(value.expiresAt)
   if (!roomId || !hostId || !currentGameId || createdAt === null || updatedAt === null || expiresAt === null) return null
   const expectedPlayersRaw = asNumber(value.expectedPlayers)
   const expectedPlayers = expectedPlayersRaw === null ? 2 : Math.max(2, Math.trunc(expectedPlayersRaw))
+  const dealerSeat = dealerSeatRaw === null ? 0 : Math.max(0, Math.trunc(dealerSeatRaw))
   return {
     roomId,
     hostId,
     expectedPlayers,
     currentGameId,
+    dealerSeat,
     createdAt,
     updatedAt,
     expiresAt,
@@ -400,6 +404,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
           hostId,
           expectedPlayers: Math.max(2, Math.trunc(asNumber(rawMeta.expectedPlayers) ?? 2)),
           currentGameId: migratedGameId,
+          dealerSeat: Math.max(0, Math.trunc(asNumber(rawMeta.dealerSeat) ?? 0)),
           createdAt,
           updatedAt,
           expiresAt,
@@ -440,6 +445,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
       hostId: input.hostId,
       expectedPlayers,
       currentGameId: createGameId(now),
+      dealerSeat: 0,
       createdAt: currentTime,
       updatedAt: currentTime,
       expiresAt: currentTime + ROOM_TTL_MS,
@@ -572,6 +578,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
           hostId: input.hostId,
           expectedPlayers,
           currentGameId,
+          dealerSeat: 0,
           status: 'waiting',
           updatedAt: currentTime,
           expiresAt: currentTime + ROOM_TTL_MS
@@ -651,7 +658,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
 
     const freshGameState = initialGameState([hostPlayer, guestPlayer])
     const playerCount = Math.max(2, freshGameState.players.length)
-    const previousDealerSeatRaw = snapshot.gameState?.dealerSeat ?? 0
+    const previousDealerSeatRaw = snapshot.meta?.dealerSeat ?? snapshot.gameState?.dealerSeat ?? 0
     const previousDealerSeat = ((previousDealerSeatRaw % playerCount) + playerCount) % playerCount
     const nextDealerSeat = ((previousDealerSeat + 1) % playerCount) as Player['seat']
     freshGameState.dealerSeat = nextDealerSeat
@@ -663,6 +670,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
         hostId: hostPlayer.id,
         expectedPlayers,
         currentGameId,
+        dealerSeat: nextDealerSeat,
         status: 'waiting',
         updatedAt: currentTime,
         expiresAt: currentTime + ROOM_TTL_MS
@@ -725,12 +733,24 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     await refreshDirectory(normalizedRoom)
   }
 
-  const upsertGameState = async (roomId: string, state: GameState): Promise<void> => {
+  const upsertGameState = async (roomId: string, state: GameState, expectedGameId?: string): Promise<boolean> => {
     const normalizedRoom = roomKey(roomId)
+    if (expectedGameId) {
+      const snapshot = await fetchRoomSnapshot(normalizedRoom)
+      if (!snapshot.meta) return false
+      if (snapshot.meta.currentGameId !== expectedGameId) return false
+    }
     await client.requestJson(`${withRoomPath(normalizedRoom)}/gameState`, {
       method: 'PUT',
       body: state
     })
+    await client.requestJson(`${withRoomPath(normalizedRoom)}/meta`, {
+      method: 'PATCH',
+      body: {
+        dealerSeat: state.dealerSeat
+      } satisfies Partial<RoomMeta>
+    })
+    return true
   }
 
   const appendAction = async (input: {

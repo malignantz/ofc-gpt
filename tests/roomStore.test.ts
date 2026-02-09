@@ -178,7 +178,8 @@ describe('roomStore action writes', () => {
     const snapshot = await store.fetchRoomSnapshot('table-state')
     if (!snapshot.gameState) throw new Error('Expected bootstrap state')
     const updated = { ...snapshot.gameState, phase: 'play' as const }
-    await store.upsertGameState('table-state', updated)
+    const wrote = await store.upsertGameState('table-state', updated, snapshot.meta?.currentGameId)
+    expect(wrote).toBe(true)
 
     const reloaded = await store.fetchRoomSnapshot('table-state')
     expect(reloaded.gameState?.phase).toBe('play')
@@ -304,6 +305,7 @@ describe('roomStore action writes', () => {
     const afterReset = await store.resetRoundSession({ roomId: 'table-round-reset' })
     expect(afterReset.meta?.currentGameId).toBeTruthy()
     expect(afterReset.meta?.currentGameId).not.toBe(previousGameId)
+    expect(afterReset.meta?.dealerSeat).toBe(1)
     expect(afterReset.actions).toEqual([])
     expect(afterReset.gameState?.phase).toBe('lobby')
     expect(afterReset.gameState?.dealerSeat).toBe(1)
@@ -327,6 +329,49 @@ describe('roomStore action writes', () => {
 
     const latest = await store.fetchRoomSnapshot('table-round-reset')
     expect(latest.actions.map((action) => action.id)).toEqual(['p1-3'])
+  })
+
+  it('ignores stale gameState upserts for older game sessions', async () => {
+    let now = 900
+    const store = createRoomStore({
+      client: new FakeFirebaseClient(),
+      now: () => {
+        now += 1
+        return now
+      }
+    })
+
+    await store.createRoom({
+      roomId: 'table-stale-state-write',
+      displayName: 'table-stale-state-write',
+      hostId: 'p1',
+      hostName: 'Host',
+      expectedPlayers: 2
+    })
+    await store.joinRoom({
+      roomId: 'table-stale-state-write',
+      playerId: 'p2',
+      playerName: 'Guest',
+      role: 'guest'
+    })
+    const beforeReset = await store.fetchRoomSnapshot('table-stale-state-write')
+    const previousGameId = beforeReset.meta?.currentGameId
+    if (!beforeReset.gameState || !previousGameId) throw new Error('Expected initial game state and game id')
+
+    const afterReset = await store.resetRoundSession({ roomId: 'table-stale-state-write', expectedGameId: previousGameId })
+    const activeGameId = afterReset.meta?.currentGameId
+    expect(activeGameId).toBeTruthy()
+    expect(activeGameId).not.toBe(previousGameId)
+    expect(afterReset.gameState?.dealerSeat).toBe(1)
+
+    const staleState = { ...beforeReset.gameState, dealerSeat: 0 as const, turnSeat: 1 as const }
+    const wrote = await store.upsertGameState('table-stale-state-write', staleState, previousGameId)
+    expect(wrote).toBe(false)
+
+    const latest = await store.fetchRoomSnapshot('table-stale-state-write')
+    expect(latest.meta?.currentGameId).toBe(activeGameId)
+    expect(latest.meta?.dealerSeat).toBe(1)
+    expect(latest.gameState?.dealerSeat).toBe(1)
   })
 
   it('does not overwrite a newer session when reset is called with stale expectedGameId', async () => {

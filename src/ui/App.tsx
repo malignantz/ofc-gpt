@@ -400,7 +400,9 @@ export default function App() {
         actionCounter.value = seedActionCounterFromLog(resolvedState.actionLog, localPlayerId, actionCounter.value)
         setState(resolvedState)
         if (!snapshot.gameState) {
-          void roomStore.upsertGameState(snapshot.roomId, resolvedState).catch(() => undefined)
+          void roomStore
+            .upsertGameState(snapshot.roomId, resolvedState, snapshot.meta?.currentGameId)
+            .catch(() => undefined)
         }
         flushOutboundQueue(snapshot.roomId)
       } else {
@@ -691,10 +693,12 @@ export default function App() {
 
   useEffect(() => {
     if (!roomSlug || !state) return
-    const signature = `${state.actionLog.length}:${state.phase}:${state.turnSeat}:${state.turnStage}:${state.drawIndex}`
+    const expectedGameId = activeGameIdRef.current
+    if (!expectedGameId) return
+    const signature = `${expectedGameId}:${state.actionLog.length}:${state.phase}:${state.dealerSeat}:${state.turnSeat}:${state.turnStage}:${state.drawIndex}`
     if (lastPersistedStateSignatureRef.current === signature) return
     lastPersistedStateSignatureRef.current = signature
-    void roomStore.upsertGameState(roomSlug, state).catch(() => undefined)
+    void roomStore.upsertGameState(roomSlug, state, expectedGameId).catch(() => undefined)
   }, [roomSlug, roomStore, state])
 
   useEffect(() => {
