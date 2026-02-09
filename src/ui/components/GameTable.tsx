@@ -47,6 +47,10 @@ export function forcedLineFromLengths(
   return candidates[0] ?? null
 }
 
+export function draftSnapshotSignature(lines: DraftLines, pending: string[]): string {
+  return `${lines.top.join(',')}|${lines.middle.join(',')}|${lines.bottom.join(',')}|${pending.join(',')}`
+}
+
 export type GameTableProps = {
   state: GameState
   localPlayerId: string
@@ -91,24 +95,31 @@ export function GameTable({
   const [rivalryScores, setRivalryScores] = useState<Record<string, RivalryScore>>({})
   const autoPlayPlacementKeyRef = useRef('')
   const autoInitialSubmitKeyRef = useRef('')
+  const initialHydrationSignatureRef = useRef('')
 
   useEffect(() => {
     if (state.phase !== 'initial') {
+      initialHydrationSignatureRef.current = ''
       setDraftPending([])
       setDraftLines({ top: [], middle: [], bottom: [] })
       return
     }
+    const nextDraftLines: DraftLines = {
+      top: (localLines?.top ?? []).map(cardToString),
+      middle: (localLines?.middle ?? []).map(cardToString),
+      bottom: (localLines?.bottom ?? []).map(cardToString)
+    }
+    const nextDraftPending = pending.map(cardToString)
+    const nextSignature = draftSnapshotSignature(nextDraftLines, nextDraftPending)
     const placed =
       (localLines?.top?.length ?? 0) +
       (localLines?.middle?.length ?? 0) +
       (localLines?.bottom?.length ?? 0)
     setSubmittedInitial(pending.length === 0 && placed === 5)
-    setDraftLines({
-      top: (localLines?.top ?? []).map(cardToString),
-      middle: (localLines?.middle ?? []).map(cardToString),
-      bottom: (localLines?.bottom ?? []).map(cardToString)
-    })
-    setDraftPending(pending.map(cardToString))
+    if (initialHydrationSignatureRef.current === nextSignature) return
+    initialHydrationSignatureRef.current = nextSignature
+    setDraftLines(nextDraftLines)
+    setDraftPending(nextDraftPending)
   }, [localLines, pending, state.phase])
 
   useEffect(() => {

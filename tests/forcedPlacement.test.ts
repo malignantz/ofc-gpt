@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { forcedLineFromLengths } from '../src/ui/components/GameTable'
+import { draftSnapshotSignature, forcedLineFromLengths } from '../src/ui/components/GameTable'
 
 describe('forced line detection', () => {
   it('returns null when multiple lines still have space', () => {
@@ -30,5 +30,31 @@ describe('forced line detection', () => {
         bottom: 5
       })
     ).toBeNull()
+  })
+})
+
+describe('initial draft signature', () => {
+  it('is stable for identical card content across new array instances', () => {
+    const first = draftSnapshotSignature(
+      { top: ['AS'], middle: ['KH'], bottom: ['2C'] },
+      ['JD', 'TC']
+    )
+    const second = draftSnapshotSignature(
+      { top: ['AS'], middle: ['KH'], bottom: ['2C'] },
+      ['JD', 'TC']
+    )
+    expect(second).toBe(first)
+  })
+
+  it('changes when card placement changes', () => {
+    const first = draftSnapshotSignature(
+      { top: ['AS'], middle: [], bottom: [] },
+      ['KH']
+    )
+    const second = draftSnapshotSignature(
+      { top: [], middle: ['AS'], bottom: [] },
+      ['KH']
+    )
+    expect(second).not.toBe(first)
   })
 })
