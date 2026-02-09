@@ -41,6 +41,8 @@ const LINE_LIMITS: Record<keyof LinesState, number> = { top: 3, middle: 5, botto
 export type GameTableProps = {
   state: GameState
   localPlayerId: string
+  connectivityByPlayerId?: Record<string, boolean>
+  waitingMessage?: string | null
   onPlace: (card: string, target: keyof LinesState) => void
   onSubmitInitial: (draft: LinesState) => void
   onResetRound: () => void
@@ -51,6 +53,8 @@ export type GameTableProps = {
 export function GameTable({
   state,
   localPlayerId,
+  connectivityByPlayerId,
+  waitingMessage,
   onPlace,
   onSubmitInitial,
   onResetRound,
@@ -236,6 +240,8 @@ export function GameTable({
   }
 
   const opponents = useMemo(() => state.players.filter((player) => player.id !== localPlayerId), [state, localPlayerId])
+  const isConnected = (playerId: string): boolean =>
+    connectivityByPlayerId?.[playerId] ?? (playerId === localPlayerId)
   const currentOpponentId = selectedOpponentId || opponents[0]?.id || ''
   const matchupByOpponent = useMemo(() => {
     const map: Record<string, HeadsUpDetailedResult> = {}
@@ -378,6 +384,10 @@ export function GameTable({
     const turnPlayer = state.players.find((p) => p.seat === state.turnSeat)
     const turnName = turnPlayer?.id === localPlayerId ? 'You' : (turnPlayer?.name ?? 'Opponent')
 
+    if (waitingMessage && (state.phase === 'lobby' || (state.phase === 'play' && !canPlace && !canDraw))) {
+      return waitingMessage
+    }
+
     switch (state.phase) {
       case 'lobby':
         return 'Waiting for players...'
@@ -399,7 +409,7 @@ export function GameTable({
       default:
         return ''
     }
-  }, [state.phase, state.turnSeat, state.players, localPlayerId, submittedInitial, canPlace, canDraw, tapPlacementMode])
+  }, [state.phase, state.turnSeat, state.players, localPlayerId, submittedInitial, canPlace, canDraw, tapPlacementMode, waitingMessage])
 
   // Which seat is currently active (for turn indicator)
   const activeSeat = (state.phase === 'play' || state.phase === 'initial') ? state.turnSeat : -1
@@ -410,6 +420,7 @@ export function GameTable({
         <div className="table-status">
           <div className="status-message">{statusMessage}</div>
           <div className="status-detail">
+            <span className={`presence-dot ${isConnected(localPlayerId) ? 'presence-online' : 'presence-offline'}`} />
             {localPlayer?.name ?? 'You'}
             {localPlayer?.seat === state.dealerSeat && <span className="dealer-chip">D</span>}
           </div>
@@ -585,6 +596,7 @@ export function GameTable({
             <div key={player.id} className={`seat seat-opponent ${isActive ? 'seat-active' : ''}`}>
               <div className="seat-head">
                 <div className="seat-title-wrap">
+                  <span className={`presence-dot ${isConnected(player.id) ? 'presence-online' : 'presence-offline'}`} />
                   <div className="seat-title">{player.name}</div>
                   {player.seat === state.dealerSeat && (
                     <span className="dealer-chip" title="Dealer button">D</span>
@@ -612,7 +624,8 @@ export function GameTable({
               </div>
               <div className="seat-sub">
                 {isActive && state.phase === 'play' && <span className="turn-dot" />}
-                Pending {state.pending[player.id]?.length ?? 0}
+                {isConnected(player.id) ? 'Connected' : `Waiting for ${player.name}`}
+                <span style={{ marginLeft: 8 }}>Pending {state.pending[player.id]?.length ?? 0}</span>
               </div>
               <div className="line-stack">
                 <Line

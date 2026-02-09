@@ -1,6 +1,6 @@
 # OFC-GPT
 
-Serverless, P2P Open-Face Chinese Poker (Classic ruleset).
+Open-Face Chinese Poker (Classic ruleset) with Firebase Realtime Database sync.
 
 ## Prerequisites
 - Node.js 20+
@@ -12,32 +12,30 @@ npm install
 npm run dev
 ```
 
-## Signaling server (local)
+## Firebase setup
+
+Set these environment variables before running the app:
+
 ```bash
-npm run worker:dev
+VITE_FIREBASE_API_KEY=...
+VITE_FIREBASE_AUTH_DOMAIN=...
+VITE_FIREBASE_DATABASE_URL=https://<project-id>-default-rtdb.firebaseio.com
+VITE_FIREBASE_PROJECT_ID=...
+VITE_FIREBASE_APP_ID=...
 ```
 
-The client defaults to `ws://localhost:8787`. You can override it via:
-```bash
-VITE_SIGNALING_URL=ws://localhost:8787 npm run dev
+This branch uses room-code based public access (no auth) for simplicity. Example RTDB rules:
+
+```json
+{
+  "rules": {
+    ".read": true,
+    ".write": true
+  }
+}
 ```
 
-## Deploy signaling to Cloudflare
-```bash
-npm install
-npm run worker:dev
-```
-
-Then deploy:
-```bash
-npx wrangler login
-npx wrangler deploy
-```
-
-After deploy, set the client to use your Worker URL:
-```bash
-VITE_SIGNALING_URL=wss://<your-worker-subdomain>.workers.dev npm run dev
-```
+Do not use these rules for production without auth constraints.
 
 ## Tests
 ```bash
@@ -45,5 +43,6 @@ npm test
 ```
 
 ## Notes
-- Signaling worker lives in `worker/worker.ts` and is designed for Cloudflare Workers.
+- Room directory entries expire 24 hours after last activity.
+- Existing signaling/WebRTC worker code is still in the repo for rollback.
 - Core logic is in `src/engine` with deterministic shuffles and OFC scoring.

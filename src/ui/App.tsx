@@ -1,30 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { stringToCard } from '../engine/cards'
 import { combineSeeds, commitSeed, createSeedPair } from '../crypto/commitReveal'
-import { GameAction, GameState, Player, initialGameState } from '../state/gameState'
+import { GameAction, GameState } from '../state/gameState'
 import { applyAction } from '../state/reducer'
 import { Lobby } from './components/Lobby'
 import { GameTable } from './components/GameTable'
-import { RoomClient } from '../net/roomClient'
-import type { NetMessage } from '../net/protocol'
 import { toRoomSlug } from './utils/roomNames'
+import { hydrateRoomState, seedActionCounterFromLog } from '../sync/roomHydration'
+import { WAITING_OPPONENT_ID } from '../sync/constants'
+import {
+  createRoomStore,
+  ParticipantPresence,
+  RoomDirectoryEntry,
+  RoomRole,
+  RoomSnapshot
+} from '../sync/roomStore'
 
 export type View = 'lobby' | 'table'
 
 const LOCAL_PLAYER_ID_KEY = 'ofc:local-player-id'
 const LOCAL_PLAYER_NAME_KEY = 'ofc:player-name'
-const ACTIVE_GAME_SNAPSHOT_KEY_PREFIX = 'ofc:active-game-v1:'
-const RECOVER_GAME_AVAILABLE = false
-
-type ActiveGameSnapshot = {
-  localPlayerId: string
-  roomSlug: string
-  playerCount: number
-  expectedPlayers: number
-  host: boolean
-  state: GameState
-  savedAt: number
-}
+const HEARTBEAT_MS = 10_000
+const PEER_PING_TIMEOUT_MS = HEARTBEAT_MS * 3
+const PEER_ACK_TIMEOUT_MS = HEARTBEAT_MS * 4
+const BOOTSTRAP_WARNING_GRACE_MS = 8_000
 
 function generatePlayerId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -66,311 +65,516 @@ function writeLocalPlayerName(name: string) {
   }
 }
 
-function activeGameSnapshotKey(localPlayerId: string): string {
-  return `${ACTIVE_GAME_SNAPSHOT_KEY_PREFIX}${localPlayerId}`
+function getParamInsensitive(params: URLSearchParams, key: string): string | null {
+  const lowered = key.toLowerCase()
+  for (const [k, value] of params.entries()) {
+    if (k.toLowerCase() === lowered) return value
+  }
+  return null
 }
 
-function readActiveGameSnapshot(localPlayerId: string): ActiveGameSnapshot | null {
-  if (typeof window === 'undefined') return null
-  try {
-    const raw = window.localStorage.getItem(activeGameSnapshotKey(localPlayerId))
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as ActiveGameSnapshot
-    if (!parsed || parsed.localPlayerId !== localPlayerId || !parsed.roomSlug || !parsed.state) return null
-    return parsed
-  } catch {
-    return null
-  }
+function parseJoinFlag(value: string | null): boolean {
+  if (!value) return false
+  const normalized = value.trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
 }
 
-function writeActiveGameSnapshot(localPlayerId: string, snapshot: ActiveGameSnapshot) {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(activeGameSnapshotKey(localPlayerId), JSON.stringify(snapshot))
-  } catch {
-    // Ignore storage write failures.
-  }
+function buildSharePath(roomSlug: string, role: RoomRole): string {
+  const join = role === 'guest' ? '&join=1' : ''
+  return `/${roomSlug}?players=2${join}`
 }
 
-function clearActiveGameSnapshot(localPlayerId: string) {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.removeItem(activeGameSnapshotKey(localPlayerId))
-  } catch {
-    // Ignore storage remove failures.
-  }
+function buildPingToken(playerId: string): string {
+  return `${playerId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
 }
 
 export default function App() {
+  const roomStore = useMemo(() => createRoomStore(), [])
   const [view, setView] = useState<View>('lobby')
   const [playerCount, setPlayerCount] = useState(2)
   const [playerName, setPlayerName] = useState(() => readLocalPlayerName())
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [fourColorDeck, setFourColorDeck] = useState(true)
   const [hideSubmitButton, setHideSubmitButton] = useState(false)
-  const [recoverGameEnabled, setRecoverGameEnabled] = useState(false)
   const [localPlayerId] = useState(() => getOrCreateLocalPlayerId())
   const [state, setState] = useState<GameState | null>(null)
-  const stateRef = useRef<GameState | null>(null)
-  const [roomClient, setRoomClient] = useState<RoomClient | null>(null)
+  const [roomSlug, setRoomSlug] = useState<string | null>(null)
+  const [roomRole, setRoomRole] = useState<RoomRole>('host')
   const [connectedPeers, setConnectedPeers] = useState<string[]>([])
+  const [participantPresenceById, setParticipantPresenceById] = useState<Record<string, ParticipantPresence>>({})
+  const [connectivityByPlayerId, setConnectivityByPlayerId] = useState<Record<string, boolean>>({
+    [localPlayerId]: true
+  })
+  const [waitingMessage, setWaitingMessage] = useState<string | null>(null)
+  const [rooms, setRooms] = useState<RoomDirectoryEntry[]>([])
+  const [roomsLoading, setRoomsLoading] = useState(false)
+  const [roomsError, setRoomsError] = useState<string | null>(null)
+  const [syncError, setSyncError] = useState<string | null>(null)
+  const [joining, setJoining] = useState(false)
+  const [copiedShare, setCopiedShare] = useState(false)
   const actionCounter = useMemo(() => ({ value: 0 }), [])
   const localSeedRef = useMemo(() => ({ value: '' }), [])
-  const [copiedShare, setCopiedShare] = useState(false)
-  const signalingUrl = useMemo(
-    () => (import.meta.env.VITE_SIGNALING_URL as string | undefined) ?? 'ws://localhost:8787',
-    []
-  )
-  const autoJoinRef = useRef(false)
-  const [roomSlug, setRoomSlug] = useState<string | null>(null)
-  const [expectedPlayers, setExpectedPlayers] = useState<number | null>(null)
+  const useCrypto = false
+
   const roomSlugRef = useRef<string | null>(null)
-  const expectedPlayersRef = useRef<number | null>(null)
-  const playerCountRef = useRef(2)
-  const viewRef = useRef<View>('lobby')
-  const hostRef = useRef(true)
-  const recoverGameEnabledRef = useRef(false)
-  const pendingNetMessages = useRef<Array<{ fromId: string; message: NetMessage }>>([])
+  const autoJoinRef = useRef(false)
+  const nameBroadcastTimerRef = useRef<number | null>(null)
+  const autoDrawRef = useRef('')
   const readySentRef = useRef(false)
   const commitSentRef = useRef(false)
   const revealSentRef = useRef(false)
-  const lastBroadcastNameRef = useRef('')
-  const nameBroadcastTimerRef = useRef<number | null>(null)
-  const reconnectTimerRef = useRef<number | null>(null)
-  const reconnectingRef = useRef(false)
-  const autoDrawRef = useRef<string>('')
   const deferredActionsRef = useRef<{ action: GameAction; attempts: number }[]>([])
-  const useCrypto = false
+  const lastHydrationSignatureRef = useRef('')
+  const lastPersistedStateSignatureRef = useRef('')
+  const latestPingTokenRef = useRef('')
+  const latestPingAtRef = useRef(0)
+  const latestAckAtRef = useRef(0)
+  const acknowledgedPeerPingRef = useRef('')
+  const bootstrapInProgressRef = useRef(false)
+  const bootstrapRoomRef = useRef<string | null>(null)
+  const bootstrapStartedAtRef = useRef(0)
 
-  const getParamInsensitive = (params: URLSearchParams, key: string) => {
-    const lowered = key.toLowerCase()
-    for (const [k, value] of params.entries()) {
-      if (k.toLowerCase() === lowered) return value
-    }
-    return null
-  }
-
-  const enqueueDeferred = (action: GameAction) => {
+  const enqueueDeferred = useCallback((action: GameAction) => {
     if (deferredActionsRef.current.some((entry) => entry.action.id === action.id)) return
     deferredActionsRef.current.push({ action, attempts: 0 })
-  }
+  }, [])
 
-  const dispatchAction = (action: GameAction) => {
-    setState((current) => {
-      if (!current) return current
-      if (current.actionLog.some((entry) => entry.id === action.id)) {
-        return current
-      }
-      try {
-        return applyAction(current, action)
-      } catch (error) {
-        console.warn('[net] Action deferred', action, error)
-        enqueueDeferred(action)
-        return current
-      }
-    })
-  }
-
-  const dispatchActions = (actions: GameAction[]) => {
-    setState((current) => {
-      if (!current) return current
-      let next = current
-      const filtered = actions.filter((action) => !current.actionLog.some((entry) => entry.id === action.id))
-      for (const action of filtered) {
-        try {
-          next = applyAction(next, action)
-        } catch (error) {
-          console.warn('[net] Action deferred', action, error)
-          enqueueDeferred(action)
+  const dispatchAction = useCallback(
+    (action: GameAction) => {
+      setState((current) => {
+        if (!current) return current
+        if (current.actionLog.some((entry) => entry.id === action.id)) {
+          return current
         }
-      }
-      return next
-    })
-  }
+        try {
+          return applyAction(current, action)
+        } catch (error) {
+          console.warn('[sync] Action deferred', action, error)
+          enqueueDeferred(action)
+          return current
+        }
+      })
+    },
+    [enqueueDeferred]
+  )
 
-  const nextActionId = () => {
+  const dispatchActions = useCallback(
+    (actions: GameAction[]) => {
+      setState((current) => {
+        if (!current) return current
+        let next = current
+        const filtered = actions.filter((action) => !current.actionLog.some((entry) => entry.id === action.id))
+        for (const action of filtered) {
+          try {
+            next = applyAction(next, action)
+          } catch (error) {
+            console.warn('[sync] Action deferred', action, error)
+            enqueueDeferred(action)
+          }
+        }
+        return next
+      })
+    },
+    [enqueueDeferred]
+  )
+
+  const nextActionId = useCallback(() => {
     actionCounter.value += 1
     return `${localPlayerId}-${actionCounter.value}`
-  }
+  }, [actionCounter, localPlayerId])
 
-  const dispatchAndBroadcast = (action: GameAction) => {
-    dispatchAction(action)
-    roomClient?.send({ type: 'action', action })
-  }
+  const applySnapshot = useCallback(
+    (snapshot: RoomSnapshot) => {
+      const now = Date.now()
+      const participantMap: Record<string, ParticipantPresence> = {}
+      snapshot.participants.forEach((participant) => {
+        if (participant.playerId === WAITING_OPPONENT_ID) return
+        participantMap[participant.playerId] = participant
+      })
+      setParticipantPresenceById(participantMap)
 
-  const dispatchBatchAndBroadcast = (actions: GameAction[]) => {
-    dispatchActions(actions)
-    actions.forEach((action) => roomClient?.send({ type: 'action', action }))
-  }
+      const peerPresence = Object.values(participantMap).find((participant) => participant.playerId !== localPlayerId)
+      const peerRecentlySeen = Boolean(peerPresence && now - peerPresence.lastSeenAt <= PEER_PING_TIMEOUT_MS)
+      const peerAckedLatestPing = Boolean(
+        peerPresence &&
+          latestPingTokenRef.current &&
+          peerPresence.ackForPeerPingToken === latestPingTokenRef.current &&
+          (peerPresence.ackAt ?? 0) > 0 &&
+          now - (peerPresence.ackAt ?? 0) <= PEER_ACK_TIMEOUT_MS
+      )
+      const peerConnected = Boolean(peerPresence && peerRecentlySeen && peerAckedLatestPing)
+
+      setConnectivityByPlayerId(() => {
+        const next: Record<string, boolean> = { [localPlayerId]: true }
+        if (peerPresence) {
+          next[peerPresence.playerId] = peerConnected
+        }
+        return next
+      })
+
+      if (!peerPresence) {
+        setWaitingMessage('Waiting for opponent to connect...')
+      } else if (!peerRecentlySeen) {
+        setWaitingMessage(`Waiting for ${peerPresence.name} to reconnect...`)
+      } else if (!peerAckedLatestPing) {
+        setWaitingMessage(`Waiting for ${peerPresence.name} to respond...`)
+      } else {
+        setWaitingMessage(null)
+      }
+
+      if (peerPresence?.pingToken && peerPresence.pingToken !== acknowledgedPeerPingRef.current) {
+        acknowledgedPeerPingRef.current = peerPresence.pingToken
+        latestAckAtRef.current = now
+        void roomStore
+          .touchPresence({
+            roomId: snapshot.roomId,
+            playerId: localPlayerId,
+            playerName,
+            role: roomRole,
+            pingToken: latestPingTokenRef.current || undefined,
+            pingAt: latestPingAtRef.current || undefined,
+            ackForPeerPingToken: peerPresence.pingToken,
+            ackAt: now
+          })
+          .catch(() => undefined)
+      }
+
+      const hydrated = hydrateRoomState({
+        localPlayerId,
+        localPlayerName: playerName,
+        participants: snapshot.participants,
+        actionRecords: snapshot.actions
+      })
+      const resolvedState = hydrated.state ?? snapshot.gameState
+      setConnectedPeers(hydrated.connectedPeerIds)
+
+      const signature = `${snapshot.roomId}|${hydrated.connectedPeerIds.join(',')}|${hydrated.actionLog
+        .map((action) => action.id)
+        .join(',')}`
+      if (signature === lastHydrationSignatureRef.current) return
+      lastHydrationSignatureRef.current = signature
+
+      if (resolvedState) {
+        actionCounter.value = seedActionCounterFromLog(hydrated.actionLog, localPlayerId, actionCounter.value)
+        setState(resolvedState)
+        if (!snapshot.gameState) {
+          void roomStore.upsertGameState(snapshot.roomId, resolvedState).catch(() => undefined)
+        }
+      } else {
+        setState(null)
+      }
+
+      const bootstrapElapsedMs = now - bootstrapStartedAtRef.current
+      const bootstrapMatchesRoom =
+        bootstrapInProgressRef.current && bootstrapRoomRef.current === snapshot.roomId
+      const suppressDroppedWarnings = bootstrapMatchesRoom && bootstrapElapsedMs <= BOOTSTRAP_WARNING_GRACE_MS
+      if (bootstrapMatchesRoom && (hydrated.droppedActionIds.length === 0 || bootstrapElapsedMs > BOOTSTRAP_WARNING_GRACE_MS)) {
+        bootstrapInProgressRef.current = false
+        bootstrapRoomRef.current = null
+      }
+
+      if (hydrated.droppedActionIds.length > 0) {
+        if (!suppressDroppedWarnings) {
+          setSyncError(`Dropped invalid actions: ${hydrated.droppedActionIds.join(', ')}`)
+        }
+      } else {
+        setSyncError((current) =>
+          current && current.startsWith('Dropped invalid actions:') ? null : current
+        )
+      }
+    },
+    [actionCounter, localPlayerId, playerName, roomRole, roomStore]
+  )
+
+  const returnToLobby = useCallback(() => {
+    const activeRoom = roomSlugRef.current
+    if (activeRoom) {
+      void roomStore.leaveRoom(activeRoom, localPlayerId).catch(() => undefined)
+    }
+    roomSlugRef.current = null
+    setRoomSlug(null)
+    setState(null)
+    setConnectedPeers([])
+    setParticipantPresenceById({})
+    setConnectivityByPlayerId({ [localPlayerId]: true })
+    setWaitingMessage(null)
+    setView('lobby')
+    setJoining(false)
+    setSyncError(null)
+    lastHydrationSignatureRef.current = ''
+    latestPingTokenRef.current = ''
+    latestPingAtRef.current = 0
+    latestAckAtRef.current = 0
+    acknowledgedPeerPingRef.current = ''
+    lastPersistedStateSignatureRef.current = ''
+    bootstrapInProgressRef.current = false
+    bootstrapRoomRef.current = null
+    bootstrapStartedAtRef.current = 0
+  }, [localPlayerId, roomStore])
+
+  const dispatchAndSync = useCallback(
+    (action: GameAction) => {
+      dispatchAction(action)
+      const activeRoom = roomSlugRef.current
+      if (!activeRoom) return
+      void roomStore
+        .appendAction({ roomId: activeRoom, actorId: localPlayerId, action })
+        .catch((error) => {
+          setSyncError(error instanceof Error ? error.message : 'Failed to append action')
+        })
+    },
+    [dispatchAction, localPlayerId, roomStore]
+  )
+
+  const dispatchBatchAndSync = useCallback(
+    (actions: GameAction[]) => {
+      dispatchActions(actions)
+      const activeRoom = roomSlugRef.current
+      if (!activeRoom) return
+      actions.forEach((action) => {
+        void roomStore
+          .appendAction({ roomId: activeRoom, actorId: localPlayerId, action })
+          .catch((error) => {
+            setSyncError(error instanceof Error ? error.message : 'Failed to append action')
+          })
+      })
+    },
+    [dispatchActions, localPlayerId, roomStore]
+  )
+
+  const startDatabaseGame = useCallback(
+    async (room: string, host: boolean) => {
+      const slug = toRoomSlug(room)
+      if (!slug) return
+      if (!roomStore.isConfigured) {
+        setSyncError('Firebase is not configured. Set VITE_FIREBASE_DATABASE_URL and related env vars.')
+        return
+      }
+
+      const previousRoom = roomSlugRef.current
+      if (previousRoom && previousRoom !== slug) {
+        await roomStore.leaveRoom(previousRoom, localPlayerId).catch(() => undefined)
+      }
+
+      setView('table')
+      setRoomSlug(slug)
+      roomSlugRef.current = slug
+      setRoomRole(host ? 'host' : 'guest')
+      setPlayerCount(2)
+      setConnectedPeers([])
+      const localPresence: ParticipantPresence = {
+        playerId: localPlayerId,
+        name: playerName,
+        role: host ? 'host' : 'guest',
+        joinedAt: Date.now(),
+        lastSeenAt: Date.now()
+      }
+      const seeded = hydrateRoomState({
+        localPlayerId,
+        localPlayerName: playerName,
+        participants: [localPresence],
+        actionRecords: []
+      })
+      setParticipantPresenceById({ [localPlayerId]: localPresence })
+      setConnectivityByPlayerId({ [localPlayerId]: true })
+      setWaitingMessage('Waiting for opponent to connect...')
+      setState(seeded.state)
+      setSyncError(null)
+      setJoining(true)
+      lastHydrationSignatureRef.current = ''
+      bootstrapInProgressRef.current = true
+      bootstrapRoomRef.current = slug
+      bootstrapStartedAtRef.current = Date.now()
+
+      try {
+        let snapshot: RoomSnapshot
+        let effectiveRole: RoomRole = host ? 'host' : 'guest'
+        const existing = await roomStore.fetchRoomSnapshot(slug)
+        if (!existing.meta) {
+          effectiveRole = 'host'
+          snapshot = await roomStore.createRoom({
+            roomId: slug,
+            displayName: slug,
+            hostId: localPlayerId,
+            hostName: playerName,
+            expectedPlayers: 2
+          })
+        } else {
+          const now = Date.now()
+          const allParticipantsStale =
+            existing.participants.length > 0 &&
+            existing.participants.every((participant) => now - participant.lastSeenAt > PEER_PING_TIMEOUT_MS)
+          const shouldRestartSession = host && (allParticipantsStale || existing.gameState === null)
+
+          if (shouldRestartSession) {
+            effectiveRole = 'host'
+            snapshot = await roomStore.restartGameSession({
+              roomId: slug,
+              hostId: localPlayerId,
+              hostName: playerName,
+              expectedPlayers: 2
+            })
+          } else {
+            const localExisting = existing.participants.find((participant) => participant.playerId === localPlayerId)
+            if (localExisting) {
+              effectiveRole = localExisting.role
+            } else {
+              const hostTaken = existing.participants.some((participant) => participant.role === 'host')
+              effectiveRole = hostTaken ? 'guest' : 'host'
+            }
+            snapshot = await roomStore.joinRoom({
+              roomId: slug,
+              playerId: localPlayerId,
+              playerName,
+              role: effectiveRole
+            })
+          }
+        }
+        setRoomRole(effectiveRole)
+        applySnapshot(snapshot)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to start database room'
+        setSyncError(message)
+        bootstrapInProgressRef.current = false
+        bootstrapRoomRef.current = null
+        bootstrapStartedAtRef.current = 0
+        roomSlugRef.current = null
+        setRoomSlug(null)
+        setConnectedPeers([])
+        setParticipantPresenceById({})
+        setConnectivityByPlayerId({ [localPlayerId]: true })
+        setWaitingMessage(null)
+        setState(null)
+        setView('lobby')
+      } finally {
+        setJoining(false)
+      }
+    },
+    [applySnapshot, localPlayerId, playerName, roomStore]
+  )
 
   useEffect(() => {
     writeLocalPlayerName(playerName)
   }, [playerName])
 
   useEffect(() => {
-    stateRef.current = state
-  }, [state])
-
-  useEffect(() => {
     roomSlugRef.current = roomSlug
   }, [roomSlug])
 
   useEffect(() => {
-    expectedPlayersRef.current = expectedPlayers
-  }, [expectedPlayers])
-
-  useEffect(() => {
-    playerCountRef.current = playerCount
-  }, [playerCount])
-
-  useEffect(() => {
-    viewRef.current = view
-  }, [view])
-
-  useEffect(() => {
-    recoverGameEnabledRef.current = recoverGameEnabled
-  }, [recoverGameEnabled])
-
-  useEffect(() => {
-    if (!RECOVER_GAME_AVAILABLE && recoverGameEnabled) {
-      setRecoverGameEnabled(false)
+    if (roomSlug === null) {
+      lastHydrationSignatureRef.current = ''
+      lastPersistedStateSignatureRef.current = ''
     }
-  }, [recoverGameEnabled])
+  }, [roomSlug])
 
-  const handleNetworkMessage = useCallback(
-    (fromId: string, message: NetMessage) => {
-      if (fromId && fromId !== localPlayerId) {
-        setConnectedPeers((current) => (current.includes(fromId) ? current : [...current, fromId]))
-      }
-      const current = stateRef.current
-      if (!current) {
-        pendingNetMessages.current.push({ fromId, message })
-        return
-      }
-      console.debug('[net] message', fromId, message)
-      if (message.type === 'action') {
-        dispatchAction(message.action)
-        return
-      }
-      if (message.type === 'syncRequest') {
-        console.debug('[net] sync request from', fromId)
-        const response: NetMessage = { type: 'syncResponse', requestId: message.requestId, log: current.actionLog }
-        roomClient?.sendTo(fromId, response)
-        return
-      }
-      if (message.type === 'syncResponse') {
-        console.debug('[net] sync response', message.log.length)
-        if (message.log.length > current.actionLog.length) {
-          dispatchActions(message.log)
-        }
-      }
-    },
-    [localPlayerId, roomClient]
-  )
+  useEffect(() => {
+    if (!roomSlug || !state) return
+    const signature = `${state.actionLog.length}:${state.phase}:${state.turnSeat}:${state.turnStage}:${state.drawIndex}`
+    if (lastPersistedStateSignatureRef.current === signature) return
+    lastPersistedStateSignatureRef.current = signature
+    void roomStore.upsertGameState(roomSlug, state).catch(() => undefined)
+  }, [roomSlug, roomStore, state])
 
-  const startNetworkedGame = (
-    room: string,
-    host: boolean,
-    options?: { restoredState?: GameState | null; expectedPlayersOverride?: number }
-  ) => {
-    const slug = toRoomSlug(room)
-    console.debug('[net] start', { room: slug, host })
-    hostRef.current = host
-    roomClient?.destroy()
-    const client = new RoomClient({
-      signalingUrl,
-      roomId: slug,
-      clientId: localPlayerId,
-      onMessage: (fromId, message) => handleNetworkMessage(fromId, message),
-      onPeerJoined: (peerId) => {
-        console.debug('[net] peer joined', peerId)
-        setConnectedPeers((current) => [...new Set([...current, peerId])])
-        const requestId = `sync-${localPlayerId}-${Date.now()}`
-        client.sendTo(peerId, { type: 'syncRequest', requestId })
+  useEffect(() => {
+    if (view !== 'lobby') return
+    if (!roomStore.isConfigured) {
+      setRooms([])
+      setRoomsLoading(false)
+      setRoomsError('Firebase room directory unavailable. Configure VITE_FIREBASE_DATABASE_URL.')
+      return
+    }
+
+    setRoomsLoading(true)
+    setRoomsError(null)
+    const unsubscribe = roomStore.subscribeRoomDirectory({
+      onUpdate: (nextRooms) => {
+        setRooms(nextRooms)
+        setRoomsLoading(false)
       },
-      onPeerList: (peerIds) => {
-        console.debug('[net] peer list', peerIds)
-        setConnectedPeers(peerIds)
-        peerIds.forEach((peerId) => {
-          const requestId = `sync-${localPlayerId}-${Date.now()}`
-          client.sendTo(peerId, { type: 'syncRequest', requestId })
-        })
-      },
-      onPeerConnected: (peerId) => {
-        console.debug('[net] peer connected', peerId)
-        const requestId = `sync-${localPlayerId}-${Date.now()}`
-        client.sendTo(peerId, { type: 'syncRequest', requestId })
-      },
-      onPeerDisconnected: (peerId) => {
-        console.debug('[net] peer disconnected', peerId)
-        setConnectedPeers((current) => current.filter((id) => id !== peerId))
-      },
-      onConnectionError: () => {
-        if (viewRef.current !== 'table') return
-        if (reconnectingRef.current) return
-        reconnectingRef.current = true
-        if (reconnectTimerRef.current !== null) {
-          window.clearTimeout(reconnectTimerRef.current)
-        }
-        reconnectTimerRef.current = window.setTimeout(() => {
-          reconnectTimerRef.current = null
-          const snapshot = recoverGameEnabledRef.current ? readActiveGameSnapshot(localPlayerId) : null
-          const restored = recoverGameEnabledRef.current
-            ? snapshot && snapshot.roomSlug === slug
-              ? snapshot.state
-              : stateRef.current
-            : null
-          const targetCount =
-            snapshot && snapshot.roomSlug === slug
-              ? snapshot.expectedPlayers
-              : expectedPlayersRef.current ?? playerCountRef.current
-          startNetworkedGame(slug, hostRef.current, {
-            restoredState: restored ?? null,
-            expectedPlayersOverride: targetCount
-          })
-          window.setTimeout(() => {
-            reconnectingRef.current = false
-          }, 0)
-        }, 900)
+      onError: (error) => {
+        setRoomsError(error.message)
+        setRoomsLoading(false)
       }
     })
-    setRoomClient(client)
-    setRoomSlug(slug)
-    setExpectedPlayers(options?.expectedPlayersOverride ?? playerCount)
-    setConnectedPeers([])
-    client.connect(host)
-    const bootstrapRequestId = `sync-bootstrap-${localPlayerId}-${Date.now()}`
-    client.send({ type: 'syncRequest', requestId: bootstrapRequestId })
-    setState(options?.restoredState ?? null)
-    setView('table')
-  }
+    return unsubscribe
+  }, [roomStore, view])
 
   useEffect(() => {
-    if (!roomClient) return
-    if (state) return
-    const allIds = [localPlayerId, ...connectedPeers]
-    const targetCount = expectedPlayers ?? playerCount
-    console.debug('[net] peers', { allIds, targetCount })
-    if (allIds.length < targetCount) return
-    const ordered = [...allIds].sort()
-    const gamePlayers: Player[] = ordered.map((id, index) => ({
-      id,
-      name: id === localPlayerId ? playerName : `Player ${index + 1}`,
-      seat: index as Player['seat'],
-      connected: true,
-      ready: false
-    }))
-    console.debug('[net] game init', ordered)
-    setState(initialGameState(gamePlayers))
-  }, [connectedPeers, localPlayerId, playerCount, playerName, roomClient, state, expectedPlayers])
+    if (!roomSlug) return
+    if (!roomStore.isConfigured) return
+    const unsubscribe = roomStore.subscribeRoomSnapshot(roomSlug, {
+      onUpdate: (snapshot) => applySnapshot(snapshot),
+      onError: (error) => setSyncError(error.message)
+    })
+    return unsubscribe
+  }, [applySnapshot, roomSlug, roomStore])
 
   useEffect(() => {
-    if (!state) return
-    if (pendingNetMessages.current.length === 0) return
-    const buffered = [...pendingNetMessages.current]
-    pendingNetMessages.current = []
-    buffered.forEach(({ fromId, message }) => handleNetworkMessage(fromId, message))
-  }, [handleNetworkMessage, state])
+    if (!roomSlug) return
+    const heartbeat = () => {
+      const pingToken = buildPingToken(localPlayerId)
+      const pingAt = Date.now()
+      latestPingTokenRef.current = pingToken
+      latestPingAtRef.current = pingAt
+      void roomStore
+        .touchPresence({
+          roomId: roomSlug,
+          playerId: localPlayerId,
+          playerName,
+          role: roomRole,
+          pingToken,
+          pingAt,
+          ackForPeerPingToken: acknowledgedPeerPingRef.current || undefined,
+          ackAt: latestAckAtRef.current || undefined
+        })
+        .catch((error) => {
+          setSyncError(error instanceof Error ? error.message : 'Failed to heartbeat room presence')
+        })
+    }
+    void heartbeat()
+    const timerId = window.setInterval(heartbeat, HEARTBEAT_MS)
+    return () => window.clearInterval(timerId)
+  }, [localPlayerId, playerName, roomRole, roomSlug, roomStore])
+
+  useEffect(() => {
+    if (autoJoinRef.current) return
+    const params = new URLSearchParams(window.location.search)
+    const pathRoom = window.location.pathname.replace(/^\//, '')
+    const room = getParamInsensitive(params, 'room') ?? (pathRoom.length > 0 ? decodeURIComponent(pathRoom) : null)
+    if (!room) return
+
+    const join = parseJoinFlag(getParamInsensitive(params, 'join'))
+    autoJoinRef.current = true
+    void startDatabaseGame(room, !join)
+  }, [startDatabaseGame])
+
+  useEffect(() => {
+    if (roomSlug && view !== 'lobby') {
+      const url = buildSharePath(roomSlug, roomRole)
+      window.history.pushState({ room: roomSlug }, '', url)
+    } else if (view === 'lobby') {
+      window.history.pushState({}, '', '/')
+    }
+  }, [roomRole, roomSlug, view])
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (window.location.pathname === '/' || window.location.pathname === '') {
+        returnToLobby()
+      }
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [returnToLobby])
+
+  useEffect(() => {
+    return () => {
+      const activeRoom = roomSlugRef.current
+      if (!activeRoom) return
+      void roomStore.leaveRoom(activeRoom, localPlayerId).catch(() => undefined)
+    }
+  }, [localPlayerId, roomStore])
 
   useEffect(() => {
     if (!state) return
@@ -382,12 +586,10 @@ export default function App() {
       for (const entry of deferredActionsRef.current) {
         try {
           next = applyAction(next, entry.action)
-        } catch (error) {
+        } catch {
           const attempts = entry.attempts + 1
           if (attempts < 6) {
             remaining.push({ action: entry.action, attempts })
-          } else {
-            console.warn('[net] Dropping action after retries', entry.action)
           }
         }
       }
@@ -397,103 +599,13 @@ export default function App() {
   }, [state])
 
   useEffect(() => {
-    if (!recoverGameEnabled) {
-      clearActiveGameSnapshot(localPlayerId)
-      return
-    }
-    if (view !== 'table' || !roomSlug || !state) return
-    if (state.phase === 'score') {
-      clearActiveGameSnapshot(localPlayerId)
-      return
-    }
-    writeActiveGameSnapshot(localPlayerId, {
-      localPlayerId,
-      roomSlug,
-      playerCount,
-      expectedPlayers: expectedPlayers ?? playerCount,
-      host: hostRef.current,
-      state,
-      savedAt: Date.now()
-    })
-  }, [expectedPlayers, localPlayerId, playerCount, recoverGameEnabled, roomSlug, state, view])
-
-  useEffect(() => {
-    if (!recoverGameEnabled) return
-    if (autoJoinRef.current) return
-    const snapshot = readActiveGameSnapshot(localPlayerId)
-    if (!snapshot) return
-    if (snapshot.state.phase === 'score') {
-      clearActiveGameSnapshot(localPlayerId)
-      return
-    }
-    autoJoinRef.current = true
-    setPlayerCount(snapshot.playerCount)
-    setExpectedPlayers(snapshot.expectedPlayers)
-    startNetworkedGame(snapshot.roomSlug, snapshot.host, {
-      restoredState: snapshot.state,
-      expectedPlayersOverride: snapshot.expectedPlayers
-    })
-  }, [localPlayerId, recoverGameEnabled])
-
-  useEffect(() => {
-    if (autoJoinRef.current) return
-    const params = new URLSearchParams(window.location.search)
-    const join = getParamInsensitive(params, 'join')
-    const playersParam = getParamInsensitive(params, 'players')
-    const pathRoom = window.location.pathname.replace(/^\//, '')
-    const room = getParamInsensitive(params, 'room') ?? (pathRoom.length > 0 ? decodeURIComponent(pathRoom) : null)
-    if (!room) return
-
-    if (playersParam) {
-      const count = Number(playersParam)
-      if (!Number.isNaN(count)) {
-        const normalized = Math.min(4, Math.max(2, count))
-        setPlayerCount(normalized)
-        setExpectedPlayers(normalized)
-        console.debug('[net] auto-join players', normalized)
-      }
-    }
-
-    const joinFlag = join?.toLowerCase()
-    const asJoiner = joinFlag === '1' || joinFlag === 'true'
-
-    autoJoinRef.current = true
-    console.debug('[net] auto-start room', room, { asJoiner })
-    startNetworkedGame(room, !asJoiner)
-  }, [])
-
-  useEffect(() => {
-    if (roomSlug && view !== 'lobby') {
-      const url = `/${roomSlug}?players=${playerCount}`
-      console.debug('[net] pushState', url)
-      window.history.pushState({ room: roomSlug }, '', url)
-    } else if (view === 'lobby') {
-      window.history.pushState({}, '', '/')
-    }
-  }, [roomSlug, view, playerCount])
-
-  useEffect(() => {
-    const onPopState = () => {
-      if (window.location.pathname === '/' || window.location.pathname === '') {
-        clearActiveGameSnapshot(localPlayerId)
-        setView('lobby')
-        setRoomSlug(null)
-        setRoomClient((prev) => { prev?.destroy(); return null })
-        setState(null)
-      }
-    }
-    window.addEventListener('popstate', onPopState)
-    return () => window.removeEventListener('popstate', onPopState)
-  }, [localPlayerId])
-
-  useEffect(() => {
     if (!state) return
     if (state.phase !== 'lobby') return
     const local = state.players.find((player) => player.id === localPlayerId)
     if (!local || local.ready || readySentRef.current) return
     readySentRef.current = true
-    dispatchAndBroadcast({ id: nextActionId(), type: 'ready', playerId: localPlayerId })
-  }, [localPlayerId, state])
+    dispatchAndSync({ id: nextActionId(), type: 'ready', playerId: localPlayerId })
+  }, [dispatchAndSync, localPlayerId, nextActionId, state])
 
   useEffect(() => {
     if (!state) {
@@ -501,41 +613,25 @@ export default function App() {
         window.clearTimeout(nameBroadcastTimerRef.current)
         nameBroadcastTimerRef.current = null
       }
-      lastBroadcastNameRef.current = ''
       return
     }
+
     const local = state.players.find((player) => player.id === localPlayerId)
-    if (!local) return
-    const shouldBroadcast = local.name !== playerName || lastBroadcastNameRef.current !== playerName
-    if (!shouldBroadcast) {
-      if (nameBroadcastTimerRef.current !== null) {
-        window.clearTimeout(nameBroadcastTimerRef.current)
-        nameBroadcastTimerRef.current = null
-      }
-      return
-    }
+    if (!local || local.name === playerName) return
 
     if (nameBroadcastTimerRef.current !== null) {
       window.clearTimeout(nameBroadcastTimerRef.current)
     }
-    nameBroadcastTimerRef.current = window.setTimeout(() => {
-      const current = stateRef.current
-      if (!current) return
-      const localNow = current.players.find((player) => player.id === localPlayerId)
-      if (!localNow) return
-      const stillNeedsBroadcast =
-        localNow.name !== playerName || lastBroadcastNameRef.current !== playerName
-      if (!stillNeedsBroadcast) return
 
-      lastBroadcastNameRef.current = playerName
-      dispatchAndBroadcast({
+    nameBroadcastTimerRef.current = window.setTimeout(() => {
+      dispatchAndSync({
         id: nextActionId(),
         type: 'setName',
         playerId: localPlayerId,
         name: playerName
       })
       nameBroadcastTimerRef.current = null
-    }, 1500)
+    }, 500)
 
     return () => {
       if (nameBroadcastTimerRef.current !== null) {
@@ -543,18 +639,7 @@ export default function App() {
         nameBroadcastTimerRef.current = null
       }
     }
-  }, [localPlayerId, playerName, state])
-
-  useEffect(() => {
-    return () => {
-      if (nameBroadcastTimerRef.current !== null) {
-        window.clearTimeout(nameBroadcastTimerRef.current)
-      }
-      if (reconnectTimerRef.current !== null) {
-        window.clearTimeout(reconnectTimerRef.current)
-      }
-    }
-  }, [])
+  }, [dispatchAndSync, localPlayerId, nextActionId, playerName, state])
 
   useEffect(() => {
     if (!state) return
@@ -566,10 +651,10 @@ export default function App() {
       const { seed } = createSeedPair()
       localSeedRef.value = seed
       const commit = await commitSeed(seed)
-      dispatchAndBroadcast({ id: nextActionId(), type: 'commitSeed', playerId: localPlayerId, commit })
+      dispatchAndSync({ id: nextActionId(), type: 'commitSeed', playerId: localPlayerId, commit })
     }
     void run()
-  }, [localPlayerId, state])
+  }, [dispatchAndSync, localPlayerId, nextActionId, state, useCrypto])
 
   useEffect(() => {
     if (!state) return
@@ -578,8 +663,8 @@ export default function App() {
     if (state.reveals[localPlayerId] || revealSentRef.current) return
     if (!localSeedRef.value) return
     revealSentRef.current = true
-    dispatchAndBroadcast({ id: nextActionId(), type: 'revealSeed', playerId: localPlayerId, seed: localSeedRef.value })
-  }, [localPlayerId, state])
+    dispatchAndSync({ id: nextActionId(), type: 'revealSeed', playerId: localPlayerId, seed: localSeedRef.value })
+  }, [dispatchAndSync, localPlayerId, nextActionId, state, useCrypto])
 
   useEffect(() => {
     if (!state) {
@@ -616,13 +701,13 @@ export default function App() {
       const combined = await combineSeeds(orderedSeeds)
       const combinedId = `derived:setCombinedSeed:${combined}`
       const startId = `derived:startRound:${combined}`
-      dispatchBatchAndBroadcast([
+      dispatchBatchAndSync([
         { id: combinedId, type: 'setCombinedSeed', seed: combined },
         { id: startId, type: 'startRound' }
       ])
     }
     void run()
-  }, [state])
+  }, [dispatchBatchAndSync, state, useCrypto])
 
   useEffect(() => {
     if (!state) return
@@ -634,13 +719,12 @@ export default function App() {
     const { seed } = createSeedPair()
     const combinedId = `derived:setCombinedSeed:${seed}`
     const startId = `derived:startRound:${seed}`
-    dispatchBatchAndBroadcast([
+    dispatchBatchAndSync([
       { id: combinedId, type: 'setCombinedSeed', seed },
       { id: startId, type: 'startRound' }
     ])
-  }, [localPlayerId, state, useCrypto])
+  }, [dispatchBatchAndSync, localPlayerId, state, useCrypto])
 
-  // In peer-symmetric mode, other players act from their own clients.
   useEffect(() => {
     if (!state || state.phase !== 'play') return
     const current = state.players.find((player) => player.seat === state.turnSeat)
@@ -649,8 +733,8 @@ export default function App() {
     const key = `${state.turnSeat}-${state.drawIndex}`
     if (autoDrawRef.current === key) return
     autoDrawRef.current = key
-    dispatchAndBroadcast({ id: nextActionId(), type: 'drawCard', playerId: localPlayerId })
-  }, [localPlayerId, state])
+    dispatchAndSync({ id: nextActionId(), type: 'drawCard', playerId: localPlayerId })
+  }, [dispatchAndSync, localPlayerId, nextActionId, state])
 
   useEffect(() => {
     if (!state || state.phase !== 'play') {
@@ -658,7 +742,6 @@ export default function App() {
     }
   }, [state?.phase])
 
-  // Dev-only: auto-place initial 5-card hand randomly across rows
   useEffect(() => {
     if (!import.meta.env.DEV) return
     if (!state || state.phase !== 'initial') return
@@ -668,57 +751,78 @@ export default function App() {
     if (!myLines) return
 
     const limits = { top: 3, middle: 5, bottom: 5 } as const
-    const remaining = { top: limits.top - myLines.top.length, middle: limits.middle - myLines.middle.length, bottom: limits.bottom - myLines.bottom.length }
+    const remaining = {
+      top: limits.top - myLines.top.length,
+      middle: limits.middle - myLines.middle.length,
+      bottom: limits.bottom - myLines.bottom.length
+    }
     const actions: GameAction[] = []
     const rows: (keyof typeof limits)[] = []
     for (const row of ['bottom', 'middle', 'top'] as const) {
-      for (let i = 0; i < remaining[row]; i++) rows.push(row)
+      for (let i = 0; i < remaining[row]; i += 1) rows.push(row)
     }
-    // Shuffle target rows
-    for (let i = rows.length - 1; i > 0; i--) {
+    for (let i = rows.length - 1; i > 0; i -= 1) {
       const j = Math.floor(Math.random() * (i + 1))
-      ;[rows[i], rows[j]] = [rows[j]!, rows[i]!]
+      ;[rows[i], rows[j]] = [rows[j] as keyof typeof limits, rows[i] as keyof typeof limits]
     }
-    for (let i = 0; i < myPending.length; i++) {
-      const card = myPending[i]!
+    for (let i = 0; i < myPending.length; i += 1) {
+      const card = myPending[i]
       const target = rows[i]
-      if (!target) break
+      if (!card || !target) break
       actions.push({ id: nextActionId(), type: 'placeCard', playerId: localPlayerId, card, target })
     }
     if (actions.length > 0) {
-      dispatchBatchAndBroadcast(actions)
+      dispatchBatchAndSync(actions)
     }
-  }, [localPlayerId, state])
+  }, [dispatchBatchAndSync, localPlayerId, nextActionId, state])
 
-  // Detect broken game state (e.g. server reset) and bail to lobby
   useEffect(() => {
     if (!state) return
     const gamePhases = ['initial', 'play', 'score'] as const
     if (!(gamePhases as readonly string[]).includes(state.phase)) return
     const hasCards = state.deck.length > 0
-    const hasAnyPending = state.players.some((p) => (state.pending[p.id]?.length ?? 0) > 0)
-    const hasAnyLines = state.players.some((p) => {
-      const lines = state.lines[p.id]
+    const hasAnyPending = state.players.some((player) => (state.pending[player.id]?.length ?? 0) > 0)
+    const hasAnyLines = state.players.some((player) => {
+      const lines = state.lines[player.id]
       if (!lines) return false
       return lines.top.length > 0 || lines.middle.length > 0 || lines.bottom.length > 0
     })
     if (!hasCards && !hasAnyPending && !hasAnyLines) {
-      console.warn('[app] Broken game state detected — no cards in play. Returning to lobby.')
-      clearActiveGameSnapshot(localPlayerId)
-      roomClient?.destroy()
-      setView('lobby')
-      setRoomSlug(null)
-      setRoomClient(null)
-      setState(null)
+      returnToLobby()
     }
-  }, [localPlayerId, roomClient, state])
+  }, [returnToLobby, state])
+
+  const sharePath = roomSlug ? buildSharePath(roomSlug, 'guest') : '/'
+  const activeTableState = useMemo(() => {
+    if (state) return state
+    if (view === 'lobby') return null
+    const participants = Object.values(participantPresenceById)
+    const fallbackParticipants =
+      participants.length > 0
+        ? participants
+        : [
+            {
+              playerId: localPlayerId,
+              name: playerName,
+              role: roomRole,
+              joinedAt: 0,
+              lastSeenAt: 0
+            } satisfies ParticipantPresence
+          ]
+    return hydrateRoomState({
+      localPlayerId,
+      localPlayerName: playerName,
+      participants: fallbackParticipants,
+      actionRecords: []
+    }).state
+  }, [localPlayerId, participantPresenceById, playerName, roomRole, state, view])
 
   return (
     <div className="app">
       <header className="app-header">
         <div>
           <div className="brand">OFC-GPT</div>
-          <div className="subtitle">P2P • Serverless • Fair Shuffle</div>
+          <div className="subtitle">Realtime DB Sync • Firebase RTDB</div>
         </div>
         <button className="button secondary" onClick={() => setSettingsOpen((open) => !open)}>
           Settings
@@ -729,37 +833,28 @@ export default function App() {
         <section className="panel settings-panel">
           <div className="settings-header">
             <h3>Settings</h3>
-            <button className="settings-close" onClick={() => setSettingsOpen(false)} aria-label="Close settings">&times;</button>
+            <button className="settings-close" onClick={() => setSettingsOpen(false)} aria-label="Close settings">
+              &times;
+            </button>
           </div>
           <label className="setting-field">
             <span>Player Name</span>
-            <input value={playerName} onChange={(e) => setPlayerName(e.target.value)} />
+            <input value={playerName} onChange={(event) => setPlayerName(event.target.value)} />
           </label>
           <label className="setting-row">
-            <input type="checkbox" checked={fourColorDeck} onChange={(e) => setFourColorDeck(e.target.checked)} />
+            <input type="checkbox" checked={fourColorDeck} onChange={(event) => setFourColorDeck(event.target.checked)} />
             4-Color Deck
           </label>
           <label className="setting-row">
-            <input
-              type="checkbox"
-              checked={hideSubmitButton}
-              onChange={(e) => setHideSubmitButton(e.target.checked)}
-            />
+            <input type="checkbox" checked={hideSubmitButton} onChange={(event) => setHideSubmitButton(event.target.checked)} />
             Hide Submit Button (initial)
           </label>
-          <label className="setting-row setting-disabled">
-            <input
-              type="checkbox"
-              checked={RECOVER_GAME_AVAILABLE ? recoverGameEnabled : false}
-              readOnly
-              disabled
-            />
-            Recover Game (WIP) - Disabled
-          </label>
-          <label className="setting-row setting-disabled">
-            <input type="checkbox" checked={false} readOnly disabled />
-            Fair Shuffle (commit–reveal) — WIP
-          </label>
+        </section>
+      )}
+
+      {syncError && (
+        <section className="panel" style={{ marginBottom: 12 }}>
+          <p>{syncError}</p>
         </section>
       )}
 
@@ -768,19 +863,29 @@ export default function App() {
           playerCount={playerCount}
           playerName={playerName}
           onPlayerNameChange={setPlayerName}
-          onPlayerCountChange={setPlayerCount}
-          onStart={(room, host) => startNetworkedGame(room, host)}
+          onPlayerCountChange={() => setPlayerCount(2)}
+          onStart={(room, host) => {
+            void startDatabaseGame(room, host)
+          }}
+          rooms={rooms}
+          roomsLoading={roomsLoading}
+          roomsError={roomsError}
+          onJoinListedRoom={(listedRoomId) => {
+            void startDatabaseGame(listedRoomId, false)
+          }}
           initialRoom={
             getParamInsensitive(new URLSearchParams(window.location.search), 'room') ??
             (window.location.pathname.replace(/^\//, '') || undefined)
           }
         />
-      ) : state ? (
+      ) : activeTableState ? (
         <GameTable
-          state={state}
+          state={activeTableState}
           localPlayerId={localPlayerId}
+          connectivityByPlayerId={connectivityByPlayerId}
+          waitingMessage={waitingMessage}
           onPlace={(card, target) =>
-            dispatchAndBroadcast({
+            dispatchAndSync({
               id: nextActionId(),
               type: 'placeCard',
               playerId: localPlayerId,
@@ -790,38 +895,38 @@ export default function App() {
           }
           onSubmitInitial={(draft) => {
             const actions: GameAction[] = []
-            draft.top.forEach((card) =>
+            draft.top.forEach((card) => {
               actions.push({ id: nextActionId(), type: 'placeCard', playerId: localPlayerId, card, target: 'top' })
-            )
-            draft.middle.forEach((card) =>
+            })
+            draft.middle.forEach((card) => {
               actions.push({ id: nextActionId(), type: 'placeCard', playerId: localPlayerId, card, target: 'middle' })
-            )
-            draft.bottom.forEach((card) =>
+            })
+            draft.bottom.forEach((card) => {
               actions.push({ id: nextActionId(), type: 'placeCard', playerId: localPlayerId, card, target: 'bottom' })
-            )
-            dispatchBatchAndBroadcast(actions)
+            })
+            dispatchBatchAndSync(actions)
           }}
-          onResetRound={() => dispatchAndBroadcast({ id: nextActionId(), type: 'resetRound' })}
+          onResetRound={() => dispatchAndSync({ id: nextActionId(), type: 'resetRound' })}
           hideSubmit={hideSubmitButton}
           fourColor={fourColorDeck}
         />
       ) : (
         <section className="panel">
-          <h2>Waiting for players...</h2>
-          <p>
-            Connected {connectedPeers.length + 1} / {playerCount}
-          </p>
+          <h2>Hydrating table...</h2>
+          {joining ? (
+            <p>Joining room...</p>
+          ) : (
+            <p>
+              Connected {connectedPeers.length + 1} / {playerCount}
+            </p>
+          )}
           <p style={{ marginTop: 12 }}>Share Link</p>
           <div className="share-row">
-            <span className="share-link">
-              {`${window.location.origin}/${roomSlug ?? ''}?players=${playerCount}&join=1`}
-            </span>
+            <span className="share-link">{`${window.location.origin}${sharePath}`}</span>
             <button
               className="button secondary"
               onClick={() => {
-                navigator.clipboard.writeText(
-                  `${window.location.origin}/${roomSlug ?? ''}?players=${playerCount}&join=1`
-                )
+                navigator.clipboard.writeText(`${window.location.origin}${sharePath}`)
                 setCopiedShare(true)
                 window.setTimeout(() => setCopiedShare(false), 1600)
               }}

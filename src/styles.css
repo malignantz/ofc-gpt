@@ -263,6 +263,24 @@ body {
   gap: 6px;
 }
 
+.presence-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.16);
+}
+
+.presence-online {
+  background: #24a85a;
+  box-shadow: 0 0 0 2px rgba(36, 168, 90, 0.15);
+}
+
+.presence-offline {
+  background: #d45252;
+  box-shadow: 0 0 0 2px rgba(212, 82, 82, 0.12);
+}
+
 .dealer-chip {
   display: inline-flex;
   align-items: center;

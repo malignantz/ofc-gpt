@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { generateRoomName, toRoomSlug } from '../utils/roomNames'
+import type { RoomDirectoryEntry } from '../../sync/roomStore'
 
 type LobbyProps = {
   playerCount: number
@@ -7,7 +8,15 @@ type LobbyProps = {
   onPlayerNameChange: (name: string) => void
   onPlayerCountChange: (count: number) => void
   onStart: (roomName: string, host: boolean) => void
+  rooms: RoomDirectoryEntry[]
+  roomsLoading: boolean
+  roomsError: string | null
+  onJoinListedRoom: (roomId: string) => void
   initialRoom?: string
+}
+
+export function triggerListedRoomJoin(onJoinListedRoom: (roomId: string) => void, roomId: string) {
+  onJoinListedRoom(roomId)
 }
 
 export function Lobby({
@@ -16,14 +25,19 @@ export function Lobby({
   onPlayerNameChange,
   onPlayerCountChange,
   onStart,
+  rooms,
+  roomsLoading,
+  roomsError,
+  onJoinListedRoom,
   initialRoom
 }: LobbyProps) {
   const [roomCode, setRoomCode] = useState(() => initialRoom ?? generateRoomName())
   const [joinName, setJoinName] = useState('')
   const [copied, setCopied] = useState(false)
+  const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin
 
   const shareSlug = toRoomSlug(roomCode)
-  const shareLink = `${window.location.origin}/${shareSlug}?players=${playerCount}&join=1`
+  const shareLink = `${origin}/${shareSlug}?players=${playerCount}&join=1`
 
   return (
     <section className="panel">
@@ -58,15 +72,8 @@ export function Lobby({
         </div>
         <div>
           <p>Players</p>
-          <select
-            value={playerCount}
-            onChange={(event) => onPlayerCountChange(Number(event.target.value))}
-          >
-            {[2, 3, 4].map((count) => (
-              <option key={count} value={count}>
-                {count} players
-              </option>
-            ))}
+          <select value={2} onChange={() => onPlayerCountChange(2)}>
+            <option value={2}>2 players</option>
           </select>
         </div>
         <div>
@@ -85,6 +92,26 @@ export function Lobby({
             onChange={(event) => setJoinName(event.target.value)}
             style={{ marginTop: 10 }}
           />
+        </div>
+        <div>
+          <p>Active Rooms</p>
+          {roomsLoading && <p>Loading rooms...</p>}
+          {roomsError && <p>{roomsError}</p>}
+          {!roomsLoading && !roomsError && rooms.length === 0 && <p>No active rooms yet.</p>}
+          {!roomsLoading && !roomsError && rooms.length > 0 && (
+            <div style={{ display: 'grid', gap: 8 }}>
+              {rooms.map((room) => (
+                <button
+                  key={room.roomId}
+                  className="button secondary"
+                  onClick={() => triggerListedRoomJoin(onJoinListedRoom, room.roomId)}
+                  style={{ textAlign: 'left' }}
+                >
+                  {room.displayName} ({room.playerCount}/{room.expectedPlayers})
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </section>
