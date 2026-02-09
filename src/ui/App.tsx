@@ -136,6 +136,21 @@ const RULES_SECTIONS: Array<{ title: string; bullets: string[] }> = [
     ]
   },
   {
+    title: 'Hand Rankings',
+    bullets: [
+      'Royal Flush: A-K-Q-J-10, same suit (in this app it pays as Straight Flush: Bottom +15, Middle +30).',
+      'Straight Flush: Five consecutive cards, same suit (Bottom +15, Middle +30).',
+      'Four of a Kind: Four cards of the same rank (Bottom +10, Middle +20).',
+      'Full House: Three of a kind plus a pair (Bottom +6, Middle +12).',
+      'Flush: Five cards of the same suit, not consecutive (Bottom +4, Middle +8).',
+      'Straight: Five consecutive cards, mixed suits allowed (Bottom +2, Middle +4).',
+      'Three of a Kind: Three cards of the same rank (Top only: 222=+10 through AAA=+22, Middle +2).',
+      'Two Pair: Two different pairs plus one kicker (no royalty on Top/Middle/Bottom).',
+      'One Pair: Two cards of the same rank plus kickers (Top only: 66=+1 through AA=+9).',
+      'High Card: No made hand; highest cards break ties (no royalty).'
+    ]
+  },
+  {
     title: 'Dealer / Restart',
     bullets: [
       'Dealer button alternates each round.',
@@ -1021,7 +1036,9 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <div>
-          <div className="brand">OFC-GPT</div>
+          <a className="brand brand-link" href="/">
+            OFC-GPT
+          </a>
           <div className="subtitle">Realtime DB Sync • Firebase RTDB</div>
         </div>
         <div className="header-actions">
