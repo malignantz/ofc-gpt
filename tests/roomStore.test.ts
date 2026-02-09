@@ -266,4 +266,22 @@ describe('roomStore action writes', () => {
     expect(afterRestart.meta?.currentGameId).not.toBe(firstGameId)
     expect(afterRestart.actions.map((action) => action.id)).toEqual(['p1-2'])
   })
+
+  it('auto-creates room on join when metadata is missing', async () => {
+    const store = createRoomStore({
+      client: new FakeFirebaseClient(),
+      now: () => 100
+    })
+
+    const snapshot = await store.joinRoom({
+      roomId: 'wolf-tree-4',
+      playerId: 'p-host',
+      playerName: 'Host',
+      role: 'guest'
+    })
+
+    expect(snapshot.meta).not.toBeNull()
+    expect(snapshot.meta?.hostId).toBe('p-host')
+    expect(snapshot.participants.some((participant) => participant.playerId === 'p-host')).toBe(true)
+  })
 })

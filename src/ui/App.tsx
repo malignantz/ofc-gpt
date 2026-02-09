@@ -430,6 +430,10 @@ export default function App() {
             })
           }
         }
+        const localParticipant = snapshot.participants.find((participant) => participant.playerId === localPlayerId)
+        if (localParticipant) {
+          effectiveRole = localParticipant.role
+        }
         setRoomRole(effectiveRole)
         applySnapshot(snapshot)
       } catch (error) {

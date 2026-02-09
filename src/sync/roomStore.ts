@@ -473,7 +473,14 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     const normalizedRoom = roomKey(input.roomId)
     const snapshot = await fetchRoomSnapshot(normalizedRoom)
     if (!snapshot.meta) {
-      throw new Error(`Room "${normalizedRoom}" does not exist.`)
+      // First connector bootstraps the room when metadata is missing.
+      return createRoom({
+        roomId: normalizedRoom,
+        displayName: normalizedRoom,
+        hostId: input.playerId,
+        hostName: input.playerName,
+        expectedPlayers: 2
+      })
     }
     const existing = snapshot.participants.find((participant) => participant.playerId === input.playerId)
     if (!existing && snapshot.participants.length >= snapshot.meta.expectedPlayers) {
