@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import type { Card as PlayingCard } from '../../engine/cards'
 import { cardToString, stringToCard } from '../../engine/cards'
 import { evaluateFive, evaluateThree } from '../../engine/handEval'
@@ -38,6 +38,14 @@ type RivalryStore = Record<string, RivalryStoreEntry>
 const TAP_PLACEMENT_HINT_DISMISSED_KEY = 'ofc:tap-placement-hint-dismissed-v1'
 const DRAFT_LINE_KEYS: Array<keyof LinesState> = ['top', 'middle', 'bottom']
 const LINE_LIMITS: Record<keyof LinesState, number> = { top: 3, middle: 5, bottom: 5 }
+
+export function forcedLineFromLengths(
+  lengths: Record<keyof LinesState, number>
+): keyof LinesState | null {
+  const candidates = DRAFT_LINE_KEYS.filter((line) => lengths[line] < LINE_LIMITS[line])
+  if (candidates.length !== 1) return null
+  return candidates[0]
+}
 
 export type GameTableProps = {
   state: GameState
@@ -81,6 +89,8 @@ export function GameTable({
   const [showTapPlacementHint, setShowTapPlacementHint] = useState(false)
   const [selectedOpponentId, setSelectedOpponentId] = useState('')
   const [rivalryScores, setRivalryScores] = useState<Record<string, RivalryScore>>({})
+  const autoPlayPlacementKeyRef = useRef('')
+  const autoInitialSubmitKeyRef = useRef('')
 
   useEffect(() => {
     if (state.phase !== 'initial') {
@@ -341,6 +351,68 @@ export function GameTable({
     }
     return map
   }, [matchupByOpponent, opponents, state.lines])
+
+  useEffect(() => {
+    if (!canPlace || !localLines || pendingCards.length !== 1) {
+      autoPlayPlacementKeyRef.current = ''
+      return
+    }
+    const forcedLine = forcedLineFromLengths({
+      top: localLines.top.length,
+      middle: localLines.middle.length,
+      bottom: localLines.bottom.length
+    })
+    if (!forcedLine) {
+      autoPlayPlacementKeyRef.current = ''
+      return
+    }
+    const card = pendingCards[0]
+    if (!card) return
+    const key = `${state.turnSeat}:${state.drawIndex}:${card}:${forcedLine}`
+    if (autoPlayPlacementKeyRef.current === key) return
+    autoPlayPlacementKeyRef.current = key
+    setSelectedCard(null)
+    onPlace(card, forcedLine)
+  }, [canPlace, localLines, onPlace, pendingCards, state.drawIndex, state.turnSeat])
+
+  useEffect(() => {
+    if (state.phase !== 'initial' || submittedInitial || draftPending.length === 0) {
+      autoInitialSubmitKeyRef.current = ''
+      return
+    }
+    const forcedLine = forcedLineFromLengths({
+      top: draftLines.top.length,
+      middle: draftLines.middle.length,
+      bottom: draftLines.bottom.length
+    })
+    if (!forcedLine) {
+      autoInitialSubmitKeyRef.current = ''
+      return
+    }
+    const remainingSlots = LINE_LIMITS[forcedLine] - draftLines[forcedLine].length
+    if (remainingSlots !== draftPending.length) return
+
+    const key = `${forcedLine}:${draftLines.top.length}-${draftLines.middle.length}-${draftLines.bottom.length}:${draftPending.join(',')}`
+    if (autoInitialSubmitKeyRef.current === key) return
+    autoInitialSubmitKeyRef.current = key
+
+    const finalDraft: DraftLines = {
+      top: [...draftLines.top],
+      middle: [...draftLines.middle],
+      bottom: [...draftLines.bottom]
+    }
+    finalDraft[forcedLine] = [...finalDraft[forcedLine], ...draftPending]
+
+    setDraftLines(finalDraft)
+    setDraftPending([])
+    setSubmittedInitial(true)
+    setSelectedCard(null)
+    onSubmitInitial({
+      top: finalDraft.top.map(stringToCardSafe),
+      middle: finalDraft.middle.map(stringToCardSafe),
+      bottom: finalDraft.bottom.map(stringToCardSafe)
+    })
+  }, [draftLines, draftPending, onSubmitInitial, state.phase, submittedInitial])
 
   const handleDrop = (event: DragEvent<HTMLDivElement>, target: keyof LinesState) => {
     event.preventDefault()
