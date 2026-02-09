@@ -185,7 +185,6 @@ export default function App() {
   const [roomsError, setRoomsError] = useState<string | null>(null)
   const [syncError, setSyncError] = useState<string | null>(null)
   const [joining, setJoining] = useState(false)
-  const [copiedShare, setCopiedShare] = useState(false)
   const actionCounter = useMemo(() => ({ value: 0 }), [])
   const localSeedRef = useMemo(() => ({ value: '' }), [])
   const useCrypto = false
@@ -1011,7 +1010,6 @@ export default function App() {
     }
   }, [returnToLobby, state])
 
-  const sharePath = roomSlug ? buildSharePath(roomSlug, 'guest') : '/'
   const activeTableState = useMemo(() => {
     if (state) return state
     if (view === 'lobby') return null
@@ -1043,7 +1041,6 @@ export default function App() {
           <a className="brand brand-link" href="/">
             OFC-GPT
           </a>
-          <div className="subtitle">Realtime DB Sync • Firebase RTDB</div>
         </div>
         <div className="header-actions">
           <button
@@ -1172,7 +1169,6 @@ export default function App() {
 
       {view === 'lobby' ? (
         <Lobby
-          playerCount={playerCount}
           playerName={playerName}
           onPlayerNameChange={setPlayerName}
           onPlayerCountChange={() => setPlayerCount(2)}
@@ -1236,21 +1232,6 @@ export default function App() {
               Connected {connectedPeers.length + 1} / {playerCount}
             </p>
           )}
-          <p style={{ marginTop: 12 }}>Share Link</p>
-          <div className="share-row">
-            <span className="share-link">{`${window.location.origin}${sharePath}`}</span>
-            <button
-              className="button secondary"
-              onClick={() => {
-                navigator.clipboard.writeText(`${window.location.origin}${sharePath}`)
-                setCopiedShare(true)
-                window.setTimeout(() => setCopiedShare(false), 1600)
-              }}
-            >
-              Copy
-            </button>
-            {copiedShare && <span className="tooltip">Copied!</span>}
-          </div>
         </section>
       )}
     </div>

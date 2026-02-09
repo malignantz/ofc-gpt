@@ -52,12 +52,6 @@ body {
   text-underline-offset: 3px;
 }
 
-.subtitle {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 2px;
-  color: #7c6f62;
-}
 
 .panel {
   background: rgba(255, 255, 255, 0.7);
@@ -573,6 +567,21 @@ body {
   box-shadow: 0 8px 20px rgba(31, 23, 17, 0.15);
 }
 
+.card-enter {
+  animation: cardFadeIn 0.2s ease both;
+}
+
+@keyframes cardFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 /* ---------- Score Panel ---------- */
 
 .score-panel {
@@ -815,58 +824,6 @@ select {
   opacity: 0.6;
 }
 
-/* ---------- Share ---------- */
-
-.share-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-  flex-wrap: wrap;
-}
-
-.share-link {
-  font-size: 12px;
-  color: #5a4f45;
-  background: #fffdf9;
-  border: 1px solid #e1d6c8;
-  padding: 6px 10px;
-  border-radius: 10px;
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.share-slug {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #7c6f62;
-}
-
-.tooltip {
-  font-size: 12px;
-  color: #1c8a4b;
-  font-weight: 600;
-  animation: tooltipFade 1.6s ease forwards;
-}
-
-@keyframes tooltipFade {
-  0% {
-    opacity: 0;
-    transform: translateY(-2px);
-  }
-  10% {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  85% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-  }
-}
 
 /* ---------- Responsive ---------- */
 

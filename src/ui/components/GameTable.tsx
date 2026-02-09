@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState, type DragEvent } from 'react'
-import { useTransition, animated } from '@react-spring/web'
 import type { Card as PlayingCard } from '../../engine/cards'
 import { cardToString, stringToCard } from '../../engine/cards'
 import { evaluateFive, evaluateThree } from '../../engine/handEval'
@@ -84,7 +83,11 @@ export function GameTable({
   const [rivalryScores, setRivalryScores] = useState<Record<string, RivalryScore>>({})
 
   useEffect(() => {
-    if (state.phase !== 'initial') return
+    if (state.phase !== 'initial') {
+      setDraftPending([])
+      setDraftLines({ top: [], middle: [], bottom: [] })
+      return
+    }
     const placed =
       (localLines?.top?.length ?? 0) +
       (localLines?.middle?.length ?? 0) +
@@ -135,12 +138,6 @@ export function GameTable({
   const pendingCards = useMemo(() => pending.map(cardToString), [pending])
   const visiblePendingCards = state.phase === 'initial' ? draftPending : pendingCards
 
-  const transitions = useTransition(visiblePendingCards, {
-    keys: (item) => item,
-    from: { opacity: 0, transform: 'translateY(-10px)' },
-    enter: { opacity: 1, transform: 'translateY(0px)' },
-    leave: { opacity: 0, transform: 'translateY(10px)' }
-  })
 
   const canDraw = state.phase === 'play' && state.turnStage === 'draw' && localPlayer?.seat === state.turnSeat
   const canPlace = state.phase === 'play' && state.turnStage === 'place' && localPlayer?.seat === state.turnSeat
@@ -625,8 +622,8 @@ export function GameTable({
           )}
         </div>
         <div className="cards">
-          {transitions((style, item) => (
-            <animated.div style={style} key={item}>
+          {visiblePendingCards.map((item) => (
+            <div className="card-enter" key={item}>
               <Card
                 value={item}
                 draggable={!tapPlacementMode && (canAdjustInitial || canPlace)}
@@ -635,7 +632,7 @@ export function GameTable({
                 selected={selectedCard?.source === 'pending' && selectedCard.card === item}
                 fourColor={fourColor}
               />
-            </animated.div>
+            </div>
           ))}
         </div>
       </div>

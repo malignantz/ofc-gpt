@@ -21,7 +21,6 @@ describe('Lobby room directory', () => {
   it('renders active room list entries', () => {
     const html = renderToStaticMarkup(
       <Lobby
-        playerCount={2}
         playerName="Host"
         onPlayerNameChange={() => undefined}
         onPlayerCountChange={() => undefined}

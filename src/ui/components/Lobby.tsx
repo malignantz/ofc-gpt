@@ -3,7 +3,6 @@ import { generateRoomName, toRoomSlug } from '../utils/roomNames'
 import type { RoomDirectoryEntry } from '../../sync/roomStore'
 
 type LobbyProps = {
-  playerCount: number
   playerName: string
   onPlayerNameChange: (name: string) => void
   onPlayerCountChange: (count: number) => void
@@ -20,7 +19,6 @@ export function triggerListedRoomJoin(onJoinListedRoom: (roomId: string) => void
 }
 
 export function Lobby({
-  playerCount,
   playerName,
   onPlayerNameChange,
   onPlayerCountChange,
@@ -33,11 +31,6 @@ export function Lobby({
 }: LobbyProps) {
   const [roomCode, setRoomCode] = useState(() => initialRoom ?? generateRoomName())
   const [joinName, setJoinName] = useState('')
-  const [copied, setCopied] = useState(false)
-  const origin = typeof window === 'undefined' ? 'http://localhost' : window.location.origin
-
-  const shareSlug = toRoomSlug(roomCode)
-  const shareLink = `${origin}/${shareSlug}?players=${playerCount}&join=1`
 
   return (
     <section className="panel">
@@ -49,22 +42,6 @@ export function Lobby({
           <button className="button secondary" onClick={() => setRoomCode(generateRoomName())}>
             Shuffle Name
           </button>
-          <p style={{ marginTop: 12 }}>Share Link</p>
-          <div className="share-row">
-            <span className="share-link">{shareLink}</span>
-            <button
-              className="button secondary"
-              onClick={() => {
-                navigator.clipboard.writeText(shareLink)
-                setCopied(true)
-                window.setTimeout(() => setCopied(false), 1600)
-              }}
-            >
-              Copy
-            </button>
-            {copied && <span className="tooltip">Copied!</span>}
-          </div>
-          <div className="share-slug">Join code: {shareSlug}</div>
         </div>
         <div>
           <p>Player Name</p>
@@ -79,7 +56,7 @@ export function Lobby({
         <div>
           <p>Start</p>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button className="button" onClick={() => onStart(shareSlug, true)}>
+            <button className="button" onClick={() => onStart(toRoomSlug(roomCode), true)}>
               Host Game
             </button>
             <button className="button secondary" onClick={() => onStart(toRoomSlug(joinName || roomCode), false)}>
