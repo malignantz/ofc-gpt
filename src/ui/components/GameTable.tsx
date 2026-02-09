@@ -4,6 +4,7 @@ import type { Card as PlayingCard } from '../../engine/cards'
 import { cardToString, stringToCard } from '../../engine/cards'
 import { GameState, LinesState } from '../../state/gameState'
 import { royaltiesBreakdown, scoreHeadsUpDetailed, type HeadsUpDetailedResult } from '../../engine/scoring'
+import { RIVALRY_STORE_KEY } from '../utils/scoreboard'
 import { Card } from './Card'
 
 type DraftLines = {
@@ -33,7 +34,6 @@ type RivalryStoreEntry = {
 
 type RivalryStore = Record<string, RivalryStoreEntry>
 
-const RIVALRY_STORE_KEY = 'ofc:rivalry-scores-v1'
 const TAP_PLACEMENT_HINT_DISMISSED_KEY = 'ofc:tap-placement-hint-dismissed-v1'
 const DRAFT_LINE_KEYS: Array<keyof LinesState> = ['top', 'middle', 'bottom']
 const LINE_LIMITS: Record<keyof LinesState, number> = { top: 3, middle: 5, bottom: 5 }

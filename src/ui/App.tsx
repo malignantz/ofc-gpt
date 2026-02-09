@@ -7,6 +7,7 @@ import { Lobby } from './components/Lobby'
 import { GameTable } from './components/GameTable'
 import { toRoomSlug } from './utils/roomNames'
 import { ROUND_TAKEOVER_TIMEOUT_MS, getRoundRestartDecision } from './utils/roundControl'
+import { ScoreboardEntry, readScoreboardEntriesFromLocalStorage } from './utils/scoreboard'
 import { hydrateRoomState, seedActionCounterFromLog } from '../sync/roomHydration'
 import { WAITING_OPPONENT_ID } from '../sync/constants'
 import {
@@ -90,12 +91,25 @@ function buildPingToken(playerId: string): string {
   return `${playerId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
 }
 
+function formatSigned(value: number): string {
+  if (value > 0) return `+${value}`
+  return `${value}`
+}
+
+function scoreClass(value: number): string {
+  if (value > 0) return 'score-positive'
+  if (value < 0) return 'score-negative'
+  return ''
+}
+
 export default function App() {
   const roomStore = useMemo(() => createRoomStore(), [])
   const [view, setView] = useState<View>('lobby')
   const [playerCount, setPlayerCount] = useState(2)
   const [playerName, setPlayerName] = useState(() => readLocalPlayerName())
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [scoreboardOpen, setScoreboardOpen] = useState(false)
+  const [scoreboardEntries, setScoreboardEntries] = useState<ScoreboardEntry[]>([])
   const [fourColorDeck, setFourColorDeck] = useState(true)
   const [hideSubmitButton, setHideSubmitButton] = useState(false)
   const [localPlayerId] = useState(() => getOrCreateLocalPlayerId())
@@ -559,6 +573,28 @@ export default function App() {
   }, [playerName])
 
   useEffect(() => {
+    if (!scoreboardOpen) return
+    if (typeof window === 'undefined') return
+    const refresh = () => setScoreboardEntries(readScoreboardEntriesFromLocalStorage(window.localStorage))
+    refresh()
+    const onStorage = () => refresh()
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [scoreboardOpen])
+
+  useEffect(() => {
+    if (!scoreboardOpen) return
+    if (typeof window === 'undefined') return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setScoreboardOpen(false)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [scoreboardOpen])
+
+  useEffect(() => {
     roomSlugRef.current = roomSlug
   }, [roomSlug])
 
@@ -919,10 +955,59 @@ export default function App() {
           <div className="brand">OFC-GPT</div>
           <div className="subtitle">Realtime DB Sync • Firebase RTDB</div>
         </div>
-        <button className="button secondary" onClick={() => setSettingsOpen((open) => !open)}>
-          Settings
-        </button>
+        <div className="header-actions">
+          <button
+            className="button secondary"
+            onClick={() => {
+              if (typeof window !== 'undefined') {
+                setScoreboardEntries(readScoreboardEntriesFromLocalStorage(window.localStorage))
+              }
+              setScoreboardOpen(true)
+            }}
+          >
+            Scoreboard
+          </button>
+          <button className="button secondary" onClick={() => setSettingsOpen((open) => !open)}>
+            Settings
+          </button>
+        </div>
       </header>
+
+      {scoreboardOpen && (
+        <div className="modal-backdrop" onClick={() => setScoreboardOpen(false)} role="presentation">
+          <section
+            className="panel scoreboard-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Scoreboard"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="settings-header">
+              <h3>Scoreboard</h3>
+              <button className="settings-close" onClick={() => setScoreboardOpen(false)} aria-label="Close scoreboard">
+                &times;
+              </button>
+            </div>
+            {scoreboardEntries.length === 0 ? (
+              <p className="rivalry-empty">No rivalry scores yet.</p>
+            ) : (
+              <div className="scoreboard-list">
+                {scoreboardEntries.map((entry) => (
+                  <div key={entry.opponentId} className="scoreboard-row">
+                    <div className="scoreboard-main">
+                      <span>{entry.name}</span>
+                      <span className={scoreClass(entry.total)}>{formatSigned(entry.total)}</span>
+                    </div>
+                    <div className="scoreboard-meta">
+                      W {entry.wins} • L {entry.losses} • T {entry.ties}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
 
       {settingsOpen && (
         <section className="panel settings-panel">
