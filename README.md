@@ -43,6 +43,6 @@ npm test
 ```
 
 ## Notes
-- Room directory entries expire 24 hours after last activity.
+- Room directory entries expire after 5 minutes of inactivity.
 - Existing signaling/WebRTC worker code is still in the repo for rollback.
 - Core logic is in `src/engine` with deterministic shuffles and OFC scoring.

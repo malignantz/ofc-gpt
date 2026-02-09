@@ -6,6 +6,7 @@ import { applyAction } from '../state/reducer'
 import { Lobby } from './components/Lobby'
 import { GameTable } from './components/GameTable'
 import { toRoomSlug } from './utils/roomNames'
+import { ROUND_TAKEOVER_TIMEOUT_MS, getRoundRestartDecision } from './utils/roundControl'
 import { hydrateRoomState, seedActionCounterFromLog } from '../sync/roomHydration'
 import { WAITING_OPPONENT_ID } from '../sync/constants'
 import {
@@ -121,9 +122,6 @@ export default function App() {
   const autoJoinRef = useRef(false)
   const nameBroadcastTimerRef = useRef<number | null>(null)
   const autoDrawRef = useRef('')
-  const readySentRef = useRef(false)
-  const commitSentRef = useRef(false)
-  const revealSentRef = useRef(false)
   const deferredActionsRef = useRef<{ action: GameAction; attempts: number }[]>([])
   const lastHydrationSignatureRef = useRef('')
   const lastPersistedStateSignatureRef = useRef('')
@@ -520,11 +518,33 @@ export default function App() {
     [applySnapshot, localPlayerId, playerName, roomStore]
   )
 
+  const roundRestartDecision = useMemo(
+    () =>
+      getRoundRestartDecision({
+        state,
+        localPlayerId,
+        connectivityByPlayerId,
+        participantPresenceById,
+        now: Date.now(),
+        takeoverTimeoutMs: ROUND_TAKEOVER_TIMEOUT_MS
+      }),
+    [connectivityByPlayerId, localPlayerId, participantPresenceById, state]
+  )
+
   const resetRoundAndSync = useCallback(() => {
     const activeRoom = roomSlugRef.current
     if (!activeRoom) return
+    if (!roundRestartDecision.canStartNextRound) {
+      setSyncError(roundRestartDecision.nextRoundHint ?? 'Only the dealer can start the next round.')
+      return
+    }
+    const expectedGameId = activeGameIdRef.current
+    if (!expectedGameId) {
+      setSyncError('Game session is not ready yet. Please retry in a moment.')
+      return
+    }
     void roomStore
-      .resetRoundSession({ roomId: activeRoom })
+      .resetRoundSession({ roomId: activeRoom, expectedGameId })
       .then((snapshot) => {
         setSyncError(null)
         applySnapshot(snapshot)
@@ -532,7 +552,7 @@ export default function App() {
       .catch((error) => {
         setSyncError(error instanceof Error ? error.message : 'Failed to reset round')
       })
-  }, [applySnapshot, roomStore])
+  }, [applySnapshot, roomStore, roundRestartDecision.canStartNextRound, roundRestartDecision.nextRoundHint])
 
   useEffect(() => {
     writeLocalPlayerName(playerName)
@@ -683,10 +703,13 @@ export default function App() {
     if (!state) return
     if (state.phase !== 'lobby') return
     const local = state.players.find((player) => player.id === localPlayerId)
-    if (!local || local.ready || readySentRef.current) return
-    readySentRef.current = true
-    dispatchAndSync({ id: nextActionId(), type: 'ready', playerId: localPlayerId })
-  }, [dispatchAndSync, localPlayerId, nextActionId, state])
+    if (!local || local.ready) return
+    const gameId = activeGameIdRef.current
+    if (!gameId) return
+    const readyActionId = `auto:ready:${gameId}:${localPlayerId}`
+    if (state.actionLog.some((action) => action.id === readyActionId)) return
+    dispatchAndSync({ id: readyActionId, type: 'ready', playerId: localPlayerId })
+  }, [dispatchAndSync, localPlayerId, state])
 
   useEffect(() => {
     if (!state) {
@@ -726,51 +749,39 @@ export default function App() {
     if (!state) return
     if (state.phase !== 'commit') return
     if (!useCrypto) return
-    if (state.commits[localPlayerId] || commitSentRef.current) return
+    if (state.commits[localPlayerId]) return
+    const gameId = activeGameIdRef.current
+    if (!gameId) return
+    const commitActionId = `auto:commitSeed:${gameId}:${localPlayerId}`
+    if (state.actionLog.some((action) => action.id === commitActionId)) return
     const run = async () => {
-      commitSentRef.current = true
       const { seed } = createSeedPair()
       localSeedRef.value = seed
       const commit = await commitSeed(seed)
-      dispatchAndSync({ id: nextActionId(), type: 'commitSeed', playerId: localPlayerId, commit })
+      dispatchAndSync({ id: commitActionId, type: 'commitSeed', playerId: localPlayerId, commit })
     }
     void run()
-  }, [dispatchAndSync, localPlayerId, nextActionId, state, useCrypto])
+  }, [dispatchAndSync, localPlayerId, state, useCrypto])
 
   useEffect(() => {
     if (!state) return
     if (state.phase !== 'reveal') return
     if (!useCrypto) return
-    if (state.reveals[localPlayerId] || revealSentRef.current) return
+    if (state.reveals[localPlayerId]) return
     if (!localSeedRef.value) return
-    revealSentRef.current = true
-    dispatchAndSync({ id: nextActionId(), type: 'revealSeed', playerId: localPlayerId, seed: localSeedRef.value })
-  }, [dispatchAndSync, localPlayerId, nextActionId, state, useCrypto])
-
-  useEffect(() => {
-    if (!state) {
-      readySentRef.current = false
-      commitSentRef.current = false
-      revealSentRef.current = false
-      return
-    }
-    if (state.phase === 'lobby') {
-      readySentRef.current = false
-      commitSentRef.current = false
-      revealSentRef.current = false
-    }
-    if (state.phase === 'commit') {
-      commitSentRef.current = false
-    }
-    if (state.phase === 'reveal') {
-      revealSentRef.current = false
-    }
-  }, [state?.phase])
+    const gameId = activeGameIdRef.current
+    if (!gameId) return
+    const revealActionId = `auto:revealSeed:${gameId}:${localPlayerId}`
+    if (state.actionLog.some((action) => action.id === revealActionId)) return
+    dispatchAndSync({ id: revealActionId, type: 'revealSeed', playerId: localPlayerId, seed: localSeedRef.value })
+  }, [dispatchAndSync, localPlayerId, state, useCrypto])
 
   useEffect(() => {
     if (!state) return
     if (state.phase !== 'reveal') return
     if (!useCrypto) return
+    const gameId = activeGameIdRef.current
+    if (!gameId) return
     const allRevealed = state.players.every((player) => Boolean(state.reveals[player.id]))
     if (!allRevealed || state.combinedSeed) return
     const orderedSeeds = [...state.players]
@@ -780,8 +791,8 @@ export default function App() {
     if (orderedSeeds.length !== state.players.length) return
     const run = async () => {
       const combined = await combineSeeds(orderedSeeds)
-      const combinedId = `derived:setCombinedSeed:${combined}`
-      const startId = `derived:startRound:${combined}`
+      const combinedId = `auto:setCombinedSeed:${gameId}`
+      const startId = `auto:startRound:${gameId}`
       dispatchBatchAndSync([
         { id: combinedId, type: 'setCombinedSeed', seed: combined },
         { id: startId, type: 'startRound' }
@@ -795,11 +806,14 @@ export default function App() {
     if (useCrypto) return
     if (state.phase !== 'commit') return
     if (state.combinedSeed) return
-    const leaderId = [...state.players].sort((a, b) => a.id.localeCompare(b.id))[0]?.id
-    if (leaderId !== localPlayerId) return
+    const gameId = activeGameIdRef.current
+    if (!gameId) return
+    const dealerId = state.players.find((player) => player.seat === state.dealerSeat)?.id
+    if (dealerId !== localPlayerId) return
     const { seed } = createSeedPair()
-    const combinedId = `derived:setCombinedSeed:${seed}`
-    const startId = `derived:startRound:${seed}`
+    const combinedId = `auto:setCombinedSeed:${gameId}`
+    const startId = `auto:startRound:${gameId}`
+    if (state.actionLog.some((action) => action.id === startId)) return
     dispatchBatchAndSync([
       { id: combinedId, type: 'setCombinedSeed', seed },
       { id: startId, type: 'startRound' }
@@ -988,6 +1002,9 @@ export default function App() {
             dispatchBatchAndSync(actions)
           }}
           onResetRound={resetRoundAndSync}
+          canStartNextRound={roundRestartDecision.canStartNextRound}
+          nextRoundLabel={roundRestartDecision.nextRoundLabel}
+          nextRoundHint={roundRestartDecision.nextRoundHint}
           hideSubmit={hideSubmitButton}
           fourColor={fourColorDeck}
         />

@@ -3,10 +3,10 @@ import { GameState, Player, initialGameState } from '../state/gameState'
 import { createFirebaseRestClient, FirebaseRestClient } from './firebaseClient'
 import { WAITING_OPPONENT_ID } from './constants'
 
-const ROOM_TTL_MS = 24 * 60 * 60 * 1000
+const ROOM_TTL_MS = 5 * 60 * 1000
 const ROOM_POLL_MS = 2000
 const DIRECTORY_POLL_MS = 3000
-const DIRECTORY_CLEANUP_MS = 5 * 60 * 1000
+const DIRECTORY_CLEANUP_MS = 60 * 1000
 
 export type RoomRole = 'host' | 'guest'
 export type RoomStatus = 'waiting' | 'active' | 'ended'
@@ -83,7 +83,7 @@ export type RoomStore = {
     hostName: string
     expectedPlayers?: number
   }) => Promise<RoomSnapshot>
-  resetRoundSession: (input: { roomId: string }) => Promise<RoomSnapshot>
+  resetRoundSession: (input: { roomId: string; expectedGameId?: string }) => Promise<RoomSnapshot>
   leaveRoom: (roomId: string, playerId: string) => Promise<void>
   touchPresence: (input: {
     roomId: string
@@ -600,11 +600,15 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     return fetchRoomSnapshot(normalizedRoom)
   }
 
-  const resetRoundSession = async (input: { roomId: string }): Promise<RoomSnapshot> => {
+  const resetRoundSession = async (input: { roomId: string; expectedGameId?: string }): Promise<RoomSnapshot> => {
     const normalizedRoom = roomKey(input.roomId)
     const snapshot = await fetchRoomSnapshot(normalizedRoom)
     if (!snapshot.meta) {
       throw new Error(`Room "${normalizedRoom}" does not exist.`)
+    }
+    if (input.expectedGameId && snapshot.meta.currentGameId !== input.expectedGameId) {
+      // Another client already restarted this session; return fresh snapshot without mutating.
+      return snapshot
     }
 
     const currentTime = now()
@@ -645,6 +649,14 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
           ready: false
         }
 
+    const freshGameState = initialGameState([hostPlayer, guestPlayer])
+    const playerCount = Math.max(2, freshGameState.players.length)
+    const previousDealerSeatRaw = snapshot.gameState?.dealerSeat ?? 0
+    const previousDealerSeat = ((previousDealerSeatRaw % playerCount) + playerCount) % playerCount
+    const nextDealerSeat = ((previousDealerSeat + 1) % playerCount) as Player['seat']
+    freshGameState.dealerSeat = nextDealerSeat
+    freshGameState.turnSeat = ((nextDealerSeat + 1) % playerCount) as Player['seat']
+
     await client.requestJson(`${withRoomPath(normalizedRoom)}/meta`, {
       method: 'PATCH',
       body: {
@@ -659,7 +671,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     await client.requestJson(`${withRoomPath(normalizedRoom)}/actions`, { method: 'PUT', body: {} })
     await client.requestJson(`${withRoomPath(normalizedRoom)}/gameState`, {
       method: 'PUT',
-      body: initialGameState([hostPlayer, guestPlayer])
+      body: freshGameState
     })
     await refreshDirectory(normalizedRoom)
     return fetchRoomSnapshot(normalizedRoom)

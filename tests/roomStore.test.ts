@@ -305,6 +305,9 @@ describe('roomStore action writes', () => {
     expect(afterReset.meta?.currentGameId).toBeTruthy()
     expect(afterReset.meta?.currentGameId).not.toBe(previousGameId)
     expect(afterReset.actions).toEqual([])
+    expect(afterReset.gameState?.phase).toBe('lobby')
+    expect(afterReset.gameState?.dealerSeat).toBe(1)
+    expect(afterReset.gameState?.turnSeat).toBe(0)
 
     const staleWrite = await store.appendAction({
       roomId: 'table-round-reset',
@@ -324,6 +327,36 @@ describe('roomStore action writes', () => {
 
     const latest = await store.fetchRoomSnapshot('table-round-reset')
     expect(latest.actions.map((action) => action.id)).toEqual(['p1-3'])
+  })
+
+  it('does not overwrite a newer session when reset is called with stale expectedGameId', async () => {
+    let now = 700
+    const store = createRoomStore({
+      client: new FakeFirebaseClient(),
+      now: () => {
+        now += 1
+        return now
+      }
+    })
+
+    await store.createRoom({
+      roomId: 'table-stale-reset',
+      displayName: 'table-stale-reset',
+      hostId: 'p1',
+      hostName: 'Host',
+      expectedPlayers: 2
+    })
+    const initial = await store.fetchRoomSnapshot('table-stale-reset')
+    const staleGameId = initial.meta?.currentGameId
+    expect(staleGameId).toBeTruthy()
+
+    const firstReset = await store.resetRoundSession({ roomId: 'table-stale-reset', expectedGameId: staleGameId })
+    const activeGameId = firstReset.meta?.currentGameId
+    expect(activeGameId).toBeTruthy()
+    expect(activeGameId).not.toBe(staleGameId)
+
+    const secondReset = await store.resetRoundSession({ roomId: 'table-stale-reset', expectedGameId: staleGameId })
+    expect(secondReset.meta?.currentGameId).toBe(activeGameId)
   })
 
   it('auto-creates room on join when metadata is missing', async () => {
@@ -369,5 +402,38 @@ describe('roomStore action writes', () => {
 
     const snapshot = await store.fetchRoomSnapshot('table-bad-state')
     expect(snapshot.gameState).toBeNull()
+  })
+
+  it('times out inactive rooms after 5 minutes and cleanup removes them', async () => {
+    let now = 1_000
+    const store = createRoomStore({
+      client: new FakeFirebaseClient(),
+      now: () => now
+    })
+
+    await store.createRoom({
+      roomId: 'timeout-room',
+      displayName: 'timeout-room',
+      hostId: 'p1',
+      hostName: 'Host',
+      expectedPlayers: 2
+    })
+
+    let directory = await store.fetchRoomDirectory()
+    expect(directory.map((entry) => entry.roomId)).toContain('timeout-room')
+
+    now += 4 * 60 * 1000 + 59 * 1000
+    directory = await store.fetchRoomDirectory()
+    expect(directory.map((entry) => entry.roomId)).toContain('timeout-room')
+
+    now += 2 * 1000
+    directory = await store.fetchRoomDirectory()
+    expect(directory.map((entry) => entry.roomId)).not.toContain('timeout-room')
+
+    const removed = await store.cleanupExpiredRooms()
+    expect(removed).toBe(1)
+
+    const snapshot = await store.fetchRoomSnapshot('timeout-room')
+    expect(snapshot.meta).toBeNull()
   })
 })

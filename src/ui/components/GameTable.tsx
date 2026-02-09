@@ -46,6 +46,9 @@ export type GameTableProps = {
   onPlace: (card: string, target: keyof LinesState) => void
   onSubmitInitial: (draft: LinesState) => void
   onResetRound: () => void
+  canStartNextRound?: boolean
+  nextRoundLabel?: string
+  nextRoundHint?: string | null
   hideSubmit?: boolean
   fourColor?: boolean
 }
@@ -58,6 +61,9 @@ export function GameTable({
   onPlace,
   onSubmitInitial,
   onResetRound,
+  canStartNextRound = true,
+  nextRoundLabel = 'Next Round',
+  nextRoundHint = null,
   hideSubmit,
   fourColor
 }: GameTableProps) {
@@ -439,9 +445,12 @@ export function GameTable({
             </>
           )}
           {state.phase === 'score' && (
-            <button className="button btn-sm" onClick={onResetRound}>
-              Next Round
-            </button>
+            <>
+              <button className="button btn-sm" onClick={onResetRound} disabled={!canStartNextRound}>
+                {nextRoundLabel}
+              </button>
+              {!canStartNextRound && nextRoundHint ? <span className="status-detail">{nextRoundHint}</span> : null}
+            </>
           )}
         </div>
       </div>
