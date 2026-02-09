@@ -21,9 +21,6 @@ describe('Lobby room directory', () => {
   it('renders active room list entries', () => {
     const html = renderToStaticMarkup(
       <Lobby
-        playerName="Host"
-        onPlayerNameChange={() => undefined}
-        onPlayerCountChange={() => undefined}
         onStart={() => undefined}
         rooms={rooms}
         roomsLoading={false}
@@ -32,8 +29,10 @@ describe('Lobby room directory', () => {
       />
     )
 
-    expect(html).toContain('Active Rooms')
-    expect(html).toContain('alpha-room (1/2)')
+    expect(html).toContain('Join Game')
+    expect(html).toContain('alpha-room')
+    expect(html).toContain('1/2')
+    expect(html).toContain('Host Host')
   })
 
   it('routes listed room join through callback helper', () => {

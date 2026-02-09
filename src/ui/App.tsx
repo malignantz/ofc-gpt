@@ -1168,16 +1168,13 @@ export default function App() {
       )}
 
       {syncError && (
-        <section className="panel" style={{ marginBottom: 12 }}>
+        <section className="panel sync-error-panel">
           <p>{syncError}</p>
         </section>
       )}
 
       {view === 'lobby' ? (
         <Lobby
-          playerName={playerName}
-          onPlayerNameChange={setPlayerName}
-          onPlayerCountChange={() => setPlayerCount(2)}
           onStart={(room, host) => {
             void startDatabaseGame(room, host)
           }}
@@ -1229,7 +1226,7 @@ export default function App() {
           fourColor={fourColorDeck}
         />
       ) : (
-        <section className="panel">
+        <section className="panel hydrate-panel">
           <h2>Hydrating table...</h2>
           {joining ? (
             <p>Joining room...</p>
