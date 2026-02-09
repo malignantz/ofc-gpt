@@ -83,6 +83,7 @@ export type RoomStore = {
     hostName: string
     expectedPlayers?: number
   }) => Promise<RoomSnapshot>
+  resetRoundSession: (input: { roomId: string }) => Promise<RoomSnapshot>
   leaveRoom: (roomId: string, playerId: string) => Promise<void>
   touchPresence: (input: {
     roomId: string
@@ -94,7 +95,12 @@ export type RoomStore = {
     ackForPeerPingToken?: string
     ackAt?: number
   }) => Promise<void>
-  appendAction: (input: { roomId: string; actorId: string; action: GameAction }) => Promise<ActionRecord | null>
+  appendAction: (input: {
+    roomId: string
+    actorId: string
+    action: GameAction
+    expectedGameId?: string
+  }) => Promise<ActionRecord | null>
   fetchRoomSnapshot: (roomId: string) => Promise<RoomSnapshot>
   upsertGameState: (roomId: string, state: GameState) => Promise<void>
   subscribeRoomSnapshot: (
@@ -580,6 +586,71 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     return fetchRoomSnapshot(normalizedRoom)
   }
 
+  const resetRoundSession = async (input: { roomId: string }): Promise<RoomSnapshot> => {
+    const normalizedRoom = roomKey(input.roomId)
+    const snapshot = await fetchRoomSnapshot(normalizedRoom)
+    if (!snapshot.meta) {
+      throw new Error(`Room "${normalizedRoom}" does not exist.`)
+    }
+
+    const currentTime = now()
+    const currentGameId = createGameId(now)
+    const expectedPlayers = Math.max(2, Math.trunc(snapshot.meta.expectedPlayers ?? 2))
+    const participantsByRole = [...snapshot.participants].sort((left, right) => {
+      if (left.role !== right.role) return left.role === 'host' ? -1 : 1
+      if (left.joinedAt !== right.joinedAt) return left.joinedAt - right.joinedAt
+      return left.playerId.localeCompare(right.playerId)
+    })
+    const hostPresence =
+      participantsByRole.find((participant) => participant.playerId === snapshot.meta?.hostId) ??
+      participantsByRole.find((participant) => participant.role === 'host')
+    const guestPresence = participantsByRole.find(
+      (participant) => participant.playerId !== hostPresence?.playerId && participant.role === 'guest'
+    )
+
+    const hostPlayer: Player = {
+      id: hostPresence?.playerId ?? snapshot.meta.hostId,
+      name: hostPresence?.name ?? 'Host',
+      seat: 0,
+      connected: true,
+      ready: false
+    }
+    const guestPlayer: Player = guestPresence
+      ? {
+          id: guestPresence.playerId,
+          name: guestPresence.name,
+          seat: 1,
+          connected: true,
+          ready: false
+        }
+      : {
+          id: WAITING_OPPONENT_ID,
+          name: 'Opponent',
+          seat: 1,
+          connected: false,
+          ready: false
+        }
+
+    await client.requestJson(`${withRoomPath(normalizedRoom)}/meta`, {
+      method: 'PATCH',
+      body: {
+        hostId: hostPlayer.id,
+        expectedPlayers,
+        currentGameId,
+        status: 'waiting',
+        updatedAt: currentTime,
+        expiresAt: currentTime + ROOM_TTL_MS
+      } satisfies Partial<RoomMeta>
+    })
+    await client.requestJson(`${withRoomPath(normalizedRoom)}/actions`, { method: 'PUT', body: {} })
+    await client.requestJson(`${withRoomPath(normalizedRoom)}/gameState`, {
+      method: 'PUT',
+      body: initialGameState([hostPlayer, guestPlayer])
+    })
+    await refreshDirectory(normalizedRoom)
+    return fetchRoomSnapshot(normalizedRoom)
+  }
+
   const leaveRoom = async (roomId: string, playerId: string): Promise<void> => {
     const normalizedRoom = roomKey(roomId)
     await client.requestJson(`${withRoomPath(normalizedRoom)}/participants/${toFirebaseKey(playerId)}`, {
@@ -640,11 +711,16 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     roomId: string
     actorId: string
     action: GameAction
+    expectedGameId?: string
   }): Promise<ActionRecord | null> => {
     const normalizedRoom = roomKey(input.roomId)
     const snapshot = await fetchRoomSnapshot(normalizedRoom)
     if (!snapshot.meta) {
       throw new Error(`Room "${normalizedRoom}" does not exist.`)
+    }
+    if (input.expectedGameId && snapshot.meta.currentGameId !== input.expectedGameId) {
+      // Stale action for a prior round/session; ignore.
+      return null
     }
     const gameId = snapshot.meta.currentGameId
     const actionId = toFirebaseKey(input.action.id)
@@ -764,6 +840,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     createRoom,
     joinRoom,
     restartGameSession,
+    resetRoundSession,
     leaveRoom,
     touchPresence,
     appendAction,

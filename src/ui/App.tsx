@@ -17,6 +17,7 @@ import {
 } from '../sync/roomStore'
 
 export type View = 'lobby' | 'table'
+type QueuedOutboundAction = { action: GameAction; gameId: string | null }
 
 const LOCAL_PLAYER_ID_KEY = 'ofc:local-player-id'
 const LOCAL_PLAYER_NAME_KEY = 'ofc:player-name'
@@ -133,8 +134,10 @@ export default function App() {
   const bootstrapInProgressRef = useRef(false)
   const bootstrapRoomRef = useRef<string | null>(null)
   const bootstrapStartedAtRef = useRef(0)
+  const activeGameIdRef = useRef<string | null>(null)
   const roomReadyRef = useRef(false)
-  const outboundActionQueueRef = useRef<GameAction[]>([])
+  const outboundActionQueueRef = useRef<QueuedOutboundAction[]>([])
+  const outboundFlushInFlightRef = useRef(false)
 
   const enqueueDeferred = useCallback((action: GameAction) => {
     if (deferredActionsRef.current.some((entry) => entry.action.id === action.id)) return
@@ -185,21 +188,34 @@ export default function App() {
     return `${localPlayerId}-${actionCounter.value}`
   }, [actionCounter, localPlayerId])
 
-  const queueOutboundAction = useCallback((action: GameAction) => {
-    if (outboundActionQueueRef.current.some((entry) => entry.id === action.id)) return
-    outboundActionQueueRef.current.push(action)
+  const queueOutboundAction = useCallback((action: GameAction, gameId: string | null) => {
+    if (outboundActionQueueRef.current.some((entry) => entry.action.id === action.id)) return
+    outboundActionQueueRef.current.push({ action, gameId })
   }, [])
 
   const flushOutboundQueue = useCallback(
     (roomId: string) => {
       if (!roomReadyRef.current) return
+      if (outboundFlushInFlightRef.current) return
       if (outboundActionQueueRef.current.length === 0) return
+      outboundFlushInFlightRef.current = true
       const queued = [...outboundActionQueueRef.current]
       outboundActionQueueRef.current = []
-      queued.forEach((action) => {
-        void roomStore
-          .appendAction({ roomId, actorId: localPlayerId, action })
-          .catch((error) => {
+      const run = async () => {
+        for (const entry of queued) {
+          const expectedGameId = entry.gameId ?? activeGameIdRef.current
+          if (!expectedGameId) {
+            queueOutboundAction(entry.action, null)
+            continue
+          }
+          try {
+            await roomStore.appendAction({
+              roomId,
+              actorId: localPlayerId,
+              action: entry.action,
+              expectedGameId
+            })
+          } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to append action'
             const suppressMissingRoomError =
               bootstrapInProgressRef.current &&
@@ -208,9 +224,13 @@ export default function App() {
             if (!suppressMissingRoomError) {
               setSyncError(message)
             }
-            // Requeue on transient bootstrap races.
-            queueOutboundAction(action)
-          })
+            // Requeue on transient bootstrap races or temporary network errors.
+            queueOutboundAction(entry.action, expectedGameId)
+          }
+        }
+      }
+      void run().finally(() => {
+        outboundFlushInFlightRef.current = false
       })
     },
     [localPlayerId, queueOutboundAction, roomStore]
@@ -219,6 +239,7 @@ export default function App() {
   const applySnapshot = useCallback(
     (snapshot: RoomSnapshot) => {
       roomReadyRef.current = Boolean(snapshot.meta)
+      activeGameIdRef.current = snapshot.meta?.currentGameId ?? null
       const now = Date.now()
       const participantMap: Record<string, ParticipantPresence> = {}
       snapshot.participants.forEach((participant) => {
@@ -279,17 +300,18 @@ export default function App() {
         participants: snapshot.participants,
         actionRecords: snapshot.actions
       })
-      const resolvedState = hydrated.state ?? snapshot.gameState
+      const shouldPreferPersistedState = hydrated.droppedActionIds.length > 0 && Boolean(snapshot.gameState)
+      const resolvedState = shouldPreferPersistedState ? snapshot.gameState : hydrated.state ?? snapshot.gameState
       setConnectedPeers(hydrated.connectedPeerIds)
 
-      const signature = `${snapshot.roomId}|${hydrated.connectedPeerIds.join(',')}|${hydrated.actionLog
-        .map((action) => action.id)
-        .join(',')}`
+      const signature = `${snapshot.roomId}|${snapshot.meta?.currentGameId ?? 'none'}|${
+        snapshot.gameState?.actionLog.length ?? -1
+      }|${hydrated.connectedPeerIds.join(',')}|${hydrated.actionLog.map((action) => action.id).join(',')}`
       if (signature === lastHydrationSignatureRef.current) return
       lastHydrationSignatureRef.current = signature
 
       if (resolvedState) {
-        actionCounter.value = seedActionCounterFromLog(hydrated.actionLog, localPlayerId, actionCounter.value)
+        actionCounter.value = seedActionCounterFromLog(resolvedState.actionLog, localPlayerId, actionCounter.value)
         setState(resolvedState)
         if (!snapshot.gameState) {
           void roomStore.upsertGameState(snapshot.roomId, resolvedState).catch(() => undefined)
@@ -345,8 +367,10 @@ export default function App() {
     bootstrapInProgressRef.current = false
     bootstrapRoomRef.current = null
     bootstrapStartedAtRef.current = 0
+    activeGameIdRef.current = null
     roomReadyRef.current = false
     outboundActionQueueRef.current = []
+    outboundFlushInFlightRef.current = false
   }, [localPlayerId, roomStore])
 
   const dispatchAndSync = useCallback(
@@ -354,25 +378,11 @@ export default function App() {
       dispatchAction(action)
       const activeRoom = roomSlugRef.current
       if (!activeRoom) return
-      if (!roomReadyRef.current) {
-        queueOutboundAction(action)
-        return
-      }
-      void roomStore
-        .appendAction({ roomId: activeRoom, actorId: localPlayerId, action })
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : 'Failed to append action'
-          const suppressMissingRoomError =
-            bootstrapInProgressRef.current &&
-            bootstrapRoomRef.current === activeRoom &&
-            message.includes('does not exist')
-          if (!suppressMissingRoomError) {
-            setSyncError(message)
-          }
-          queueOutboundAction(action)
-        })
+      queueOutboundAction(action, activeGameIdRef.current)
+      if (!roomReadyRef.current) return
+      flushOutboundQueue(activeRoom)
     },
-    [dispatchAction, localPlayerId, queueOutboundAction, roomStore]
+    [dispatchAction, flushOutboundQueue, queueOutboundAction]
   )
 
   const dispatchBatchAndSync = useCallback(
@@ -380,27 +390,11 @@ export default function App() {
       dispatchActions(actions)
       const activeRoom = roomSlugRef.current
       if (!activeRoom) return
-      if (!roomReadyRef.current) {
-        actions.forEach((action) => queueOutboundAction(action))
-        return
-      }
-      actions.forEach((action) => {
-        void roomStore
-          .appendAction({ roomId: activeRoom, actorId: localPlayerId, action })
-          .catch((error) => {
-            const message = error instanceof Error ? error.message : 'Failed to append action'
-            const suppressMissingRoomError =
-              bootstrapInProgressRef.current &&
-              bootstrapRoomRef.current === activeRoom &&
-              message.includes('does not exist')
-            if (!suppressMissingRoomError) {
-              setSyncError(message)
-            }
-            queueOutboundAction(action)
-          })
-      })
+      actions.forEach((action) => queueOutboundAction(action, activeGameIdRef.current))
+      if (!roomReadyRef.current) return
+      flushOutboundQueue(activeRoom)
     },
-    [dispatchActions, localPlayerId, queueOutboundAction, roomStore]
+    [dispatchActions, flushOutboundQueue, queueOutboundAction]
   )
 
   const startDatabaseGame = useCallback(
@@ -443,8 +437,10 @@ export default function App() {
       setSyncError(null)
       setJoining(true)
       lastHydrationSignatureRef.current = ''
+      activeGameIdRef.current = null
       roomReadyRef.current = false
       outboundActionQueueRef.current = []
+      outboundFlushInFlightRef.current = false
       bootstrapInProgressRef.current = true
       bootstrapRoomRef.current = slug
       bootstrapStartedAtRef.current = Date.now()
@@ -505,8 +501,10 @@ export default function App() {
         bootstrapInProgressRef.current = false
         bootstrapRoomRef.current = null
         bootstrapStartedAtRef.current = 0
+        activeGameIdRef.current = null
         roomReadyRef.current = false
         outboundActionQueueRef.current = []
+        outboundFlushInFlightRef.current = false
         roomSlugRef.current = null
         setRoomSlug(null)
         setConnectedPeers([])
@@ -521,6 +519,20 @@ export default function App() {
     },
     [applySnapshot, localPlayerId, playerName, roomStore]
   )
+
+  const resetRoundAndSync = useCallback(() => {
+    const activeRoom = roomSlugRef.current
+    if (!activeRoom) return
+    void roomStore
+      .resetRoundSession({ roomId: activeRoom })
+      .then((snapshot) => {
+        setSyncError(null)
+        applySnapshot(snapshot)
+      })
+      .catch((error) => {
+        setSyncError(error instanceof Error ? error.message : 'Failed to reset round')
+      })
+  }, [applySnapshot, roomStore])
 
   useEffect(() => {
     writeLocalPlayerName(playerName)
@@ -975,7 +987,7 @@ export default function App() {
             })
             dispatchBatchAndSync(actions)
           }}
-          onResetRound={() => dispatchAndSync({ id: nextActionId(), type: 'resetRound' })}
+          onResetRound={resetRoundAndSync}
           hideSubmit={hideSubmitButton}
           fourColor={fourColorDeck}
         />

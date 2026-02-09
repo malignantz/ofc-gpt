@@ -267,6 +267,65 @@ describe('roomStore action writes', () => {
     expect(afterRestart.actions.map((action) => action.id)).toEqual(['p1-2'])
   })
 
+  it('rotates gameId on round reset and ignores stale action writes from previous game', async () => {
+    let now = 500
+    const store = createRoomStore({
+      client: new FakeFirebaseClient(),
+      now: () => {
+        now += 1
+        return now
+      }
+    })
+
+    await store.createRoom({
+      roomId: 'table-round-reset',
+      displayName: 'table-round-reset',
+      hostId: 'p1',
+      hostName: 'Host',
+      expectedPlayers: 2
+    })
+    await store.joinRoom({
+      roomId: 'table-round-reset',
+      playerId: 'p2',
+      playerName: 'Guest',
+      role: 'guest'
+    })
+    await store.appendAction({
+      roomId: 'table-round-reset',
+      actorId: 'p1',
+      action: { id: 'p1-1', type: 'ready', playerId: 'p1' }
+    })
+
+    const beforeReset = await store.fetchRoomSnapshot('table-round-reset')
+    const previousGameId = beforeReset.meta?.currentGameId
+    expect(previousGameId).toBeTruthy()
+    expect(beforeReset.actions.map((action) => action.id)).toEqual(['p1-1'])
+
+    const afterReset = await store.resetRoundSession({ roomId: 'table-round-reset' })
+    expect(afterReset.meta?.currentGameId).toBeTruthy()
+    expect(afterReset.meta?.currentGameId).not.toBe(previousGameId)
+    expect(afterReset.actions).toEqual([])
+
+    const staleWrite = await store.appendAction({
+      roomId: 'table-round-reset',
+      actorId: 'p1',
+      action: { id: 'p1-2', type: 'ready', playerId: 'p1' },
+      expectedGameId: previousGameId
+    })
+    expect(staleWrite).toBeNull()
+
+    const activeWrite = await store.appendAction({
+      roomId: 'table-round-reset',
+      actorId: 'p1',
+      action: { id: 'p1-3', type: 'ready', playerId: 'p1' },
+      expectedGameId: afterReset.meta?.currentGameId
+    })
+    expect(activeWrite?.id).toBe('p1-3')
+
+    const latest = await store.fetchRoomSnapshot('table-round-reset')
+    expect(latest.actions.map((action) => action.id)).toEqual(['p1-3'])
+  })
+
   it('auto-creates room on join when metadata is missing', async () => {
     const store = createRoomStore({
       client: new FakeFirebaseClient(),
