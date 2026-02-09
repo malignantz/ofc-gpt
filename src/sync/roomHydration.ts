@@ -1,5 +1,5 @@
 import { applyAction } from '../state/reducer'
-import { GameAction, GameState, Player, initialGameState } from '../state/gameState'
+import { GameAction, GameState, Player, Seat, initialGameState } from '../state/gameState'
 import { ActionRecord, ParticipantPresence } from './roomStore'
 import { WAITING_OPPONENT_ID } from './constants'
 
@@ -53,6 +53,7 @@ export function hydrateRoomState(input: {
   localPlayerName: string
   participants: ParticipantPresence[]
   actionRecords: ActionRecord[]
+  initialDealerSeat?: number
 }): RoomHydrationResult {
   const sortedParticipants = sortParticipants(input.participants)
   const connectedPeerIds = sortedParticipants
@@ -103,6 +104,15 @@ export function hydrateRoomState(input: {
   const orderedActions = dedupeActionsById(sortActionRecords(input.actionRecords).map((record) => record.action))
   const droppedActionIds: string[] = []
   let state = initialGameState(players)
+  if (typeof input.initialDealerSeat === 'number') {
+    const count = Math.max(1, state.players.length)
+    const normalized = ((input.initialDealerSeat % count) + count) % count
+    state = {
+      ...state,
+      dealerSeat: normalized as Seat,
+      turnSeat: ((normalized + 1) % count) as Seat
+    }
+  }
   let pending = [...orderedActions]
   let progress = true
   // Retry loop allows causal actions (e.g. startRound after setCombinedSeed) to settle

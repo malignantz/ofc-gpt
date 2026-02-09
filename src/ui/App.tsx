@@ -370,7 +370,8 @@ export default function App() {
         localPlayerId,
         localPlayerName: playerName,
         participants: snapshot.participants,
-        actionRecords: snapshot.actions
+        actionRecords: snapshot.actions,
+        initialDealerSeat: snapshot.meta?.dealerSeat ?? snapshot.gameState?.dealerSeat
       })
       const resolvedState = resolveIncomingState({
         hydratedState: hydrated.state,

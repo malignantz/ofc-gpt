@@ -148,6 +148,41 @@ describe('roomHydration', () => {
     expect(hydrated.state?.phase).toBe('initial')
   })
 
+  it('uses initialDealerSeat when provided', () => {
+    const records: ActionRecord[] = [
+      {
+        id: 'p1-1',
+        gameId: 'g1',
+        actorId: 'p1',
+        createdAt: 10,
+        action: { id: 'p1-1', type: 'ready', playerId: 'p1' }
+      }
+    ]
+
+    const hydrated = hydrateRoomState({
+      localPlayerId: 'p1',
+      localPlayerName: 'Host',
+      participants,
+      actionRecords: records,
+      initialDealerSeat: 1
+    })
+
+    expect(hydrated.state?.dealerSeat).toBe(1)
+    expect(hydrated.state?.turnSeat).toBe(0)
+  })
+
+  it('defaults to dealerSeat 0 when initialDealerSeat is omitted', () => {
+    const hydrated = hydrateRoomState({
+      localPlayerId: 'p1',
+      localPlayerName: 'Host',
+      participants,
+      actionRecords: []
+    })
+
+    expect(hydrated.state?.dealerSeat).toBe(0)
+    expect(hydrated.state?.turnSeat).toBe(0)
+  })
+
   it('seeds local action counter from log', () => {
     const next = seedActionCounterFromLog(
       [{ id: 'p1-2' }, { id: 'p2-1' }, { id: 'p1-9' }, { id: 'p1-3' }],

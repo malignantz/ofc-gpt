@@ -44,7 +44,7 @@ export function forcedLineFromLengths(
 ): keyof LinesState | null {
   const candidates = DRAFT_LINE_KEYS.filter((line) => lengths[line] < LINE_LIMITS[line])
   if (candidates.length !== 1) return null
-  return candidates[0]
+  return candidates[0] ?? null
 }
 
 export type GameTableProps = {
