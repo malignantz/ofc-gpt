@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { cardToString } from '../src/engine/cards'
 import { hydrateRoomState, seedActionCounterFromLog } from '../src/sync/roomHydration'
 import { WAITING_OPPONENT_ID } from '../src/sync/constants'
 import { ActionRecord, ParticipantPresence } from '../src/sync/roomStore'
@@ -21,6 +22,46 @@ describe('roomHydration', () => {
     expect(hydrated.state?.players).toHaveLength(2)
     expect(hydrated.state?.players.some((player) => player.id === WAITING_OPPONENT_ID)).toBe(true)
     expect(hydrated.connectedPeerIds).toEqual([])
+  })
+
+  it('keeps guest card assignment stable when local presence is temporarily missing', () => {
+    const startRoundRecords: ActionRecord[] = [
+      {
+        id: 'p1-1',
+        gameId: 'g1',
+        actorId: 'p1',
+        createdAt: 10,
+        action: { id: 'p1-1', type: 'setCombinedSeed', seed: '00'.repeat(32) }
+      },
+      {
+        id: 'p1-2',
+        gameId: 'g1',
+        actorId: 'p1',
+        createdAt: 11,
+        action: { id: 'p1-2', type: 'startRound' }
+      }
+    ]
+
+    const withBothParticipants = hydrateRoomState({
+      localPlayerId: 'p2',
+      localPlayerName: 'Guest',
+      localRole: 'guest',
+      participants,
+      actionRecords: startRoundRecords
+    })
+
+    const hostOnlySnapshot = hydrateRoomState({
+      localPlayerId: 'p2',
+      localPlayerName: 'Guest',
+      localRole: 'guest',
+      participants: [participants[0] as ParticipantPresence],
+      actionRecords: startRoundRecords
+    })
+
+    const expectedPending = (withBothParticipants.state?.pending.p2 ?? []).map(cardToString)
+    const hostOnlyPending = (hostOnlySnapshot.state?.pending.p2 ?? []).map(cardToString)
+
+    expect(hostOnlyPending).toEqual(expectedPending)
   })
 
   it('replays actions ordered by createdAt then id', () => {

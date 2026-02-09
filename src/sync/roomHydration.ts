@@ -1,6 +1,6 @@
 import { applyAction } from '../state/reducer'
 import { GameAction, GameState, Player, Seat, initialGameState } from '../state/gameState'
-import { ActionRecord, ParticipantPresence } from './roomStore'
+import { ActionRecord, ParticipantPresence, type RoomRole } from './roomStore'
 import { WAITING_OPPONENT_ID } from './constants'
 
 export type RoomHydrationResult = {
@@ -51,6 +51,7 @@ export function seedActionCounterFromLog(log: Array<{ id: string }>, localPlayer
 export function hydrateRoomState(input: {
   localPlayerId: string
   localPlayerName: string
+  localRole?: RoomRole
   participants: ParticipantPresence[]
   actionRecords: ActionRecord[]
   initialDealerSeat?: number
@@ -66,7 +67,7 @@ export function hydrateRoomState(input: {
     ({
       playerId: input.localPlayerId,
       name: input.localPlayerName,
-      role: 'host',
+      role: input.localRole ?? 'host',
       joinedAt: 0,
       lastSeenAt: 0
     } satisfies ParticipantPresence)

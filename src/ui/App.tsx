@@ -369,6 +369,7 @@ export default function App() {
       const hydrated = hydrateRoomState({
         localPlayerId,
         localPlayerName: playerName,
+        localRole: roomRole,
         participants: snapshot.participants,
         actionRecords: snapshot.actions,
         initialDealerSeat: snapshot.meta?.dealerSeat ?? snapshot.gameState?.dealerSeat
@@ -515,6 +516,7 @@ export default function App() {
       const seeded = hydrateRoomState({
         localPlayerId,
         localPlayerName: playerName,
+        localRole: host ? 'host' : 'guest',
         participants: [localPresence],
         actionRecords: []
       })
@@ -1030,6 +1032,7 @@ export default function App() {
     return hydrateRoomState({
       localPlayerId,
       localPlayerName: playerName,
+      localRole: roomRole,
       participants: fallbackParticipants,
       actionRecords: []
     }).state
