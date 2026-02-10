@@ -8,26 +8,56 @@ import type {
   InitialPlacementInput,
   PlacementDecision,
   PlacementTarget,
-  PlayPlacementInput
+  PlayPlacementInput,
+  StrategyProfile
 } from './types'
 
 const LINE_LIMITS: Record<PlacementTarget, number> = { top: 3, middle: 5, bottom: 5 }
 const TARGET_PRIORITY: PlacementTarget[] = ['bottom', 'middle', 'top']
-const N_PLAY_ROLLOUTS = 96
-const N_INITIAL_ROLLOUTS = 24
-const BEAM_WIDTH = 40
-const FINALISTS = 24
+const PLAY_STAGE1_ROLLOUTS = 16
+const PLAY_STAGE2_ROLLOUTS = 24
+const PLAY_STAGE3_ROLLOUTS = 24
+const PLAY_TOP_K = 2
+
+const INITIAL_STAGE1_ROLLOUTS = 4
+const INITIAL_STAGE2_ROLLOUTS = 12
+const INITIAL_STAGE3_ROLLOUTS = 12
+const INITIAL_TOP_K = 24
+
+const ROLLOUT_GAP_THRESHOLD = 1.5
 
 type UtilitySummary = {
   utility: number
   mean: number
   stdDev: number
   foulRate: number
+  entrySignal: number
+  reentrySignal: number
 }
 
-type BeamNode = {
+type RolloutStats = {
+  samples: number
+  sum: number
+  sumSquares: number
+  foulCount: number
+}
+
+type CandidateSpec = {
+  key: string
   lines: LinesState
-  heuristic: number
+  seedPrefix: string
+}
+
+type CandidateEvaluation = CandidateSpec & {
+  stats: RolloutStats
+  summary: UtilitySummary
+}
+
+type UtilityWeights = {
+  variancePenalty: number
+  foulPenalty: number
+  entryBonus: number
+  reentryBonus: number
 }
 
 function cloneLines(lines: LinesState): LinesState {
@@ -88,6 +118,91 @@ function partialLineHeuristic(cards: Card[]): number {
     if (count === 4) score += 20
   }
   return score
+}
+
+function strategyWeights(profile?: StrategyProfile): UtilityWeights {
+  // Default profile weights balance raw EV against foul avoidance and fantasyline pressure.
+  switch (profile) {
+    case 'fantasy_pressure':
+      return {
+        variancePenalty: 0.25,
+        foulPenalty: 34,
+        entryBonus: 14,
+        reentryBonus: 8
+      }
+    case 'balanced_ev':
+      return {
+        variancePenalty: 0.3,
+        foulPenalty: 40,
+        entryBonus: 9,
+        reentryBonus: 5
+      }
+    case 'conservative_ev':
+    default:
+      return {
+        variancePenalty: 0.35,
+        foulPenalty: 44,
+        entryBonus: 6,
+        reentryBonus: 3
+      }
+  }
+}
+
+function topEntrySignal(cards: Card[]): number {
+  if (cards.length === 0) return 0
+  if (cards.length === 3) {
+    const topRank = evaluateThree(cards)
+    if (topRank.category === 2) return 1.35
+    if (topRank.category === 1) {
+      const pairRank = topRank.kickers[0] ?? 0
+      if (pairRank >= 12) return 1
+      if (pairRank >= 10) return 0.45
+      return 0.2
+    }
+    return 0
+  }
+
+  if (cards.length === 2) {
+    const [first, second] = cards
+    if (!first || !second) return 0
+    const firstValue = rankValue(first.rank)
+    const secondValue = rankValue(second.rank)
+    if (first.rank === second.rank) {
+      if (firstValue >= 12) return 0.75
+      if (firstValue >= 10) return 0.35
+      return 0.15
+    }
+    const high = Math.max(firstValue, secondValue)
+    return high >= 13 ? 0.12 : 0.04
+  }
+
+  const first = cards[0]
+  if (!first) return 0
+  const firstValue = rankValue(first.rank)
+  if (firstValue >= 13) return 0.08
+  if (firstValue >= 11) return 0.04
+  return 0
+}
+
+function fantasySignals(lines: LinesState): { entrySignal: number; reentrySignal: number } {
+  const entrySignal = topEntrySignal(lines.top)
+
+  let reentrySignal = entrySignal * 0.45
+  if (lines.middle.length === LINE_LIMITS.middle) {
+    reentrySignal += royaltiesMiddle(lines.middle) / 30
+  } else {
+    reentrySignal += Math.min(0.35, partialLineHeuristic(lines.middle) / 90)
+  }
+  if (lines.bottom.length === LINE_LIMITS.bottom) {
+    reentrySignal += royaltiesBottom(lines.bottom) / 20
+  } else {
+    reentrySignal += Math.min(0.3, partialLineHeuristic(lines.bottom) / 100)
+  }
+
+  return {
+    entrySignal,
+    reentrySignal
+  }
 }
 
 function lineStrengthScore(lines: LinesState, line: PlacementTarget): number {
@@ -204,6 +319,36 @@ function linesSignature(lines: LinesState): string {
   return `${lines.top.map(cardKey).join(',')}|${lines.middle.map(cardKey).join(',')}|${lines.bottom.map(cardKey).join(',')}`
 }
 
+function enumerateInitialCandidates(base: LinesState, pending: Card[]): LinesState[] {
+  const results: LinesState[] = []
+
+  const walk = (index: number, current: LinesState) => {
+    if (index >= pending.length) {
+      results.push(cloneLines(current))
+      return
+    }
+
+    const card = pending[index]
+    if (!card) {
+      walk(index + 1, current)
+      return
+    }
+
+    const targets = legalTargets(current)
+    if (targets.length === 0) return
+
+    for (const target of targets) {
+      current[target].push(card)
+      walk(index + 1, current)
+      current[target].pop()
+    }
+  }
+
+  walk(0, cloneLines(base))
+  results.sort((left, right) => linesSignature(left).localeCompare(linesSignature(right)))
+  return results
+}
+
 function simulateRollout(input: {
   botStart: LinesState
   opponentStart: LinesState
@@ -232,36 +377,158 @@ function simulateRollout(input: {
   return { total: detailed.player.total, foul: detailed.fouls.player }
 }
 
-function computeUtility(input: {
-  botCandidate: LinesState
+function emptyRolloutStats(): RolloutStats {
+  return {
+    samples: 0,
+    sum: 0,
+    sumSquares: 0,
+    foulCount: 0
+  }
+}
+
+function summarizeRolloutStats(input: {
+  stats: RolloutStats
+  weights: UtilityWeights
+  lines: LinesState
+}): UtilitySummary {
+  const signals = fantasySignals(input.lines)
+  const { stats } = input
+  if (stats.samples <= 0) {
+    return {
+      utility: -100 + signals.entrySignal * input.weights.entryBonus + signals.reentrySignal * input.weights.reentryBonus,
+      mean: -100,
+      stdDev: 0,
+      foulRate: 1,
+      entrySignal: signals.entrySignal,
+      reentrySignal: signals.reentrySignal
+    }
+  }
+  const mean = stats.sum / stats.samples
+  const variance = Math.max(0, stats.sumSquares / stats.samples - mean * mean)
+  const stdDev = Math.sqrt(variance)
+  const foulRate = stats.foulCount / stats.samples
+  const utility =
+    mean -
+    input.weights.variancePenalty * stdDev -
+    foulRate * input.weights.foulPenalty +
+    signals.entrySignal * input.weights.entryBonus +
+    signals.reentrySignal * input.weights.reentryBonus
+  return {
+    utility,
+    mean,
+    stdDev,
+    foulRate,
+    entrySignal: signals.entrySignal,
+    reentrySignal: signals.reentrySignal
+  }
+}
+
+function utilityValue(summary: UtilitySummary): number {
+  return Number.isFinite(summary.utility) ? summary.utility : Number.NEGATIVE_INFINITY
+}
+
+function compareEvaluations(left: CandidateEvaluation, right: CandidateEvaluation): number {
+  const leftUtility = utilityValue(left.summary)
+  const rightUtility = utilityValue(right.summary)
+  if (leftUtility < rightUtility) return 1
+  if (leftUtility > rightUtility) return -1
+  return left.key.localeCompare(right.key)
+}
+
+function sampleCandidateRollouts(input: {
+  candidate: CandidateEvaluation
   visibleOpponentLines: LinesState
   unknownPool: Card[]
-  rollouts: number
-  seedPrefix: string
-}): UtilitySummary {
-  const sampleCount = Math.max(1, input.rollouts)
-  let sum = 0
-  let sumSquares = 0
-  let foulCount = 0
-
-  for (let i = 0; i < sampleCount; i += 1) {
+  additionalRollouts: number
+  weights: UtilityWeights
+}): void {
+  const rolloutCount = Math.max(0, input.additionalRollouts)
+  for (let i = 0; i < rolloutCount; i += 1) {
+    const sampleIndex = input.candidate.stats.samples
     const simulation = simulateRollout({
-      botStart: input.botCandidate,
+      botStart: input.candidate.lines,
       opponentStart: input.visibleOpponentLines,
       unknownPool: input.unknownPool,
-      seed: `${input.seedPrefix}:${i}`
+      seed: `${input.candidate.seedPrefix}:${sampleIndex}`
     })
-    sum += simulation.total
-    sumSquares += simulation.total * simulation.total
-    if (simulation.foul) foulCount += 1
+    input.candidate.stats.samples += 1
+    input.candidate.stats.sum += simulation.total
+    input.candidate.stats.sumSquares += simulation.total * simulation.total
+    if (simulation.foul) input.candidate.stats.foulCount += 1
+  }
+  input.candidate.summary = summarizeRolloutStats({
+    stats: input.candidate.stats,
+    lines: input.candidate.lines,
+    weights: input.weights
+  })
+}
+
+function evaluateCandidatesAdaptive(input: {
+  candidates: CandidateSpec[]
+  visibleOpponentLines: LinesState
+  unknownPool: Card[]
+  profile?: StrategyProfile
+  stage1Rollouts: number
+  stage2Rollouts: number
+  stage3Rollouts: number
+  topK: number
+  gapThreshold: number
+}): CandidateEvaluation[] {
+  const weights = strategyWeights(input.profile)
+  const evaluations: CandidateEvaluation[] = input.candidates.map((candidate) => ({
+    ...candidate,
+    stats: emptyRolloutStats(),
+    summary: summarizeRolloutStats({
+      stats: emptyRolloutStats(),
+      lines: candidate.lines,
+      weights
+    })
+  }))
+  if (evaluations.length === 0) return evaluations
+
+  for (const evaluation of evaluations) {
+    sampleCandidateRollouts({
+      candidate: evaluation,
+      visibleOpponentLines: input.visibleOpponentLines,
+      unknownPool: input.unknownPool,
+      additionalRollouts: input.stage1Rollouts,
+      weights
+    })
   }
 
-  const mean = sum / sampleCount
-  const variance = Math.max(0, sumSquares / sampleCount - mean * mean)
-  const stdDev = Math.sqrt(variance)
-  const foulRate = foulCount / sampleCount
-  const utility = mean - 0.3 * stdDev - foulRate * 40
-  return { utility, mean, stdDev, foulRate }
+  const finalistCount = Math.max(1, Math.min(evaluations.length, input.topK))
+  let ranked = [...evaluations].sort(compareEvaluations)
+  for (const evaluation of ranked.slice(0, finalistCount)) {
+    sampleCandidateRollouts({
+      candidate: evaluation,
+      visibleOpponentLines: input.visibleOpponentLines,
+      unknownPool: input.unknownPool,
+      additionalRollouts: input.stage2Rollouts,
+      weights
+    })
+  }
+
+  ranked = [...evaluations].sort(compareEvaluations)
+  if (input.stage3Rollouts > 0 && ranked.length > 1) {
+    const first = ranked[0]
+    const second = ranked[1]
+    const gap = utilityValue(first.summary) - utilityValue(second.summary)
+    if (!Number.isFinite(gap) || gap < input.gapThreshold) {
+      const contenders = ranked.slice(0, Math.min(2, finalistCount))
+      for (const evaluation of contenders) {
+        sampleCandidateRollouts({
+          candidate: evaluation,
+          visibleOpponentLines: input.visibleOpponentLines,
+          unknownPool: input.unknownPool,
+          additionalRollouts: input.stage3Rollouts,
+          weights
+        })
+      }
+      ranked = [...evaluations].sort(compareEvaluations)
+    }
+  }
+
+  return ranked
 }
 
 function fallbackTarget(lines: LinesState): PlacementTarget {
@@ -289,28 +556,38 @@ export function choosePlayPlacement(input: PlayPlacementInput): PlacementDecisio
   }
 
   const unknownPool = buildUnknownPool(input)
-  let bestTarget = legal[0] ?? 'top'
-  let bestUtility = Number.NEGATIVE_INFINITY
-
-  for (const target of legal) {
-    const candidate = withPlacedCard(input.botLines, target, botCard)
-    const utility = computeUtility({
-      botCandidate: candidate,
-      visibleOpponentLines: input.visibleOpponentLines,
-      unknownPool,
-      rollouts: N_PLAY_ROLLOUTS,
+  const ranked = evaluateCandidatesAdaptive({
+    candidates: legal.map((target) => ({
+      key: target,
+      lines: withPlacedCard(input.botLines, target, botCard),
       seedPrefix: `${input.signatureSeed}:play:${target}:${input.drawIndex}`
-    }).utility
-    byTarget[target] = utility
-    if (utility > bestUtility) {
-      bestUtility = utility
-      bestTarget = target
-    }
+    })),
+    visibleOpponentLines: input.visibleOpponentLines,
+    unknownPool,
+    profile: input.profile,
+    stage1Rollouts: PLAY_STAGE1_ROLLOUTS,
+    stage2Rollouts: PLAY_STAGE2_ROLLOUTS,
+    stage3Rollouts: PLAY_STAGE3_ROLLOUTS,
+    topK: PLAY_TOP_K,
+    gapThreshold: ROLLOUT_GAP_THRESHOLD
+  })
+
+  for (const evaluation of ranked) {
+    const target = evaluation.key as PlacementTarget
+    byTarget[target] = evaluation.summary.utility
   }
 
+  const best = ranked[0]
+  const bestTarget = (best?.key as PlacementTarget | undefined) ?? legal[0] ?? 'top'
+  const bestUtility = best?.summary.utility ?? Number.NEGATIVE_INFINITY
+
   if (!Number.isFinite(bestUtility)) {
-    bestTarget = fallbackTarget(input.botLines)
-    bestUtility = -100
+    const fallback = fallbackTarget(input.botLines)
+    return {
+      target: fallback,
+      utility: -100,
+      byTarget
+    }
   }
 
   return {
@@ -344,56 +621,30 @@ export function chooseInitialPlacement(input: InitialPlacementInput): InitialPla
     }
   }
 
-  let beam: BeamNode[] = [{ lines: cloneLines(input.botLines), heuristic: 0 }]
-  for (let cardIndex = 0; cardIndex < input.botPending.length; cardIndex += 1) {
-    const card = input.botPending[cardIndex]
-    if (!card) continue
-
-    const expanded: BeamNode[] = []
-    for (const node of beam) {
-      const targets = legalTargets(node.lines)
-      for (const target of targets) {
-        const nextLines = withPlacedCard(node.lines, target, card)
-        const nextHeuristic = node.heuristic + greedyPlacementScore(node.lines, target, card)
-        expanded.push({ lines: nextLines, heuristic: nextHeuristic })
-      }
-    }
-
-    if (expanded.length === 0) {
-      return buildFallbackInitial(input.botLines, input.botPending)
-    }
-
-    expanded.sort((left, right) => {
-      if (right.heuristic !== left.heuristic) return right.heuristic - left.heuristic
-      return linesSignature(left.lines).localeCompare(linesSignature(right.lines))
-    })
-    beam = expanded.slice(0, BEAM_WIDTH)
-  }
-
-  const finalists = beam.slice(0, FINALISTS)
-  if (finalists.length === 0) {
+  const candidates = enumerateInitialCandidates(input.botLines, input.botPending)
+  if (candidates.length === 0) {
     return buildFallbackInitial(input.botLines, input.botPending)
   }
 
   const unknownPool = buildUnknownPool(input)
-  let bestNode = finalists[0]
-  let bestUtility = Number.NEGATIVE_INFINITY
+  const ranked = evaluateCandidatesAdaptive({
+    candidates: candidates.map((candidate, index) => ({
+      key: linesSignature(candidate),
+      lines: candidate,
+      seedPrefix: `${input.signatureSeed}:initial:${input.drawIndex}:${index}`
+    })),
+    visibleOpponentLines: input.visibleOpponentLines,
+    unknownPool,
+    profile: input.profile,
+    stage1Rollouts: INITIAL_STAGE1_ROLLOUTS,
+    stage2Rollouts: INITIAL_STAGE2_ROLLOUTS,
+    stage3Rollouts: INITIAL_STAGE3_ROLLOUTS,
+    topK: INITIAL_TOP_K,
+    gapThreshold: ROLLOUT_GAP_THRESHOLD
+  })
 
-  for (let i = 0; i < finalists.length; i += 1) {
-    const finalist = finalists[i]
-    if (!finalist) continue
-    const evaluation = computeUtility({
-      botCandidate: finalist.lines,
-      visibleOpponentLines: input.visibleOpponentLines,
-      unknownPool,
-      rollouts: N_INITIAL_ROLLOUTS,
-      seedPrefix: `${input.signatureSeed}:initial:${input.drawIndex}:${i}`
-    })
-    if (evaluation.utility > bestUtility) {
-      bestUtility = evaluation.utility
-      bestNode = finalist
-    }
-  }
+  const bestNode = ranked[0]
+  const bestUtility = bestNode?.summary.utility ?? Number.NEGATIVE_INFINITY
 
   if (!Number.isFinite(bestUtility)) {
     return buildFallbackInitial(input.botLines, input.botPending)
