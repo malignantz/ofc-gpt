@@ -21,10 +21,22 @@ import {
 
 export type View = 'lobby' | 'table'
 type QueuedOutboundAction = { action: GameAction; gameId: string | null }
+type PresenceUpdateInput = {
+  roomId: string
+  playerId: string
+  playerName: string
+  role: RoomRole
+  joinedAt?: number
+  pingToken?: string
+  pingAt?: number
+  ackForPeerPingToken?: string
+  ackAt?: number
+}
 
 const LOCAL_PLAYER_ID_KEY = 'ofc:local-player-id'
 const LOCAL_PLAYER_NAME_KEY = 'ofc:player-name'
 const HEARTBEAT_MS = 10_000
+const MIN_PRESENCE_WRITE_MS = 1_000
 const PEER_PING_TIMEOUT_MS = HEARTBEAT_MS * 3
 const PEER_ACK_TIMEOUT_MS = HEARTBEAT_MS * 4
 const BOOTSTRAP_WARNING_GRACE_MS = 8_000
@@ -224,6 +236,11 @@ export default function App() {
   const roomReadyRef = useRef(false)
   const outboundActionQueueRef = useRef<QueuedOutboundAction[]>([])
   const outboundFlushInFlightRef = useRef(false)
+  const localJoinedAtRef = useRef<number | undefined>(undefined)
+  const lastPresenceWriteAtRef = useRef(0)
+  const presenceWriteTimerRef = useRef<number | null>(null)
+  const pendingPresenceUpdateRef = useRef<PresenceUpdateInput | null>(null)
+  const presenceWriteInFlightRef = useRef(false)
 
   const enqueueDeferred = useCallback((action: GameAction) => {
     if (deferredActionsRef.current.some((entry) => entry.action.id === action.id)) return
@@ -322,6 +339,50 @@ export default function App() {
     [localPlayerId, queueOutboundAction, roomStore]
   )
 
+  const flushPresenceUpdate = useCallback(() => {
+    if (presenceWriteInFlightRef.current) return
+    const payload = pendingPresenceUpdateRef.current
+    if (!payload) return
+
+    const elapsedMs = Date.now() - lastPresenceWriteAtRef.current
+    if (elapsedMs < MIN_PRESENCE_WRITE_MS) {
+      if (presenceWriteTimerRef.current === null) {
+        presenceWriteTimerRef.current = window.setTimeout(() => {
+          presenceWriteTimerRef.current = null
+          flushPresenceUpdate()
+        }, MIN_PRESENCE_WRITE_MS - elapsedMs)
+      }
+      return
+    }
+
+    pendingPresenceUpdateRef.current = null
+    presenceWriteInFlightRef.current = true
+    lastPresenceWriteAtRef.current = Date.now()
+    void roomStore
+      .touchPresence(payload)
+      .catch((error) => {
+        setSyncError(error instanceof Error ? error.message : 'Failed to update room presence')
+      })
+      .finally(() => {
+        presenceWriteInFlightRef.current = false
+        if (!pendingPresenceUpdateRef.current) return
+        const waitMs = Math.max(0, MIN_PRESENCE_WRITE_MS - (Date.now() - lastPresenceWriteAtRef.current))
+        if (presenceWriteTimerRef.current !== null) return
+        presenceWriteTimerRef.current = window.setTimeout(() => {
+          presenceWriteTimerRef.current = null
+          flushPresenceUpdate()
+        }, waitMs)
+      })
+  }, [roomStore])
+
+  const queuePresenceUpdate = useCallback(
+    (payload: PresenceUpdateInput) => {
+      pendingPresenceUpdateRef.current = payload
+      flushPresenceUpdate()
+    },
+    [flushPresenceUpdate]
+  )
+
   const applySnapshot = useCallback(
     (snapshot: RoomSnapshot) => {
       const previousGameId = activeGameIdRef.current
@@ -335,6 +396,10 @@ export default function App() {
         participantMap[participant.playerId] = participant
       })
       setParticipantPresenceById(participantMap)
+      const localPresence = participantMap[localPlayerId]
+      if (localPresence?.joinedAt) {
+        localJoinedAtRef.current = localPresence.joinedAt
+      }
 
       const peerPresence = Object.values(participantMap).find((participant) => participant.playerId !== localPlayerId)
       const peerRecentlySeen = Boolean(peerPresence && now - peerPresence.lastSeenAt <= PEER_PING_TIMEOUT_MS)
@@ -368,19 +433,17 @@ export default function App() {
       if (peerPresence?.pingToken && peerPresence.pingToken !== acknowledgedPeerPingRef.current) {
         acknowledgedPeerPingRef.current = peerPresence.pingToken
         latestAckAtRef.current = now
-        void roomStore
-          .touchPresence({
-            roomId: snapshot.roomId,
-            playerId: localPlayerId,
-            playerName,
-            role: roomRole,
-            joinedAt: participantMap[localPlayerId]?.joinedAt,
-            pingToken: latestPingTokenRef.current || undefined,
-            pingAt: latestPingAtRef.current || undefined,
-            ackForPeerPingToken: peerPresence.pingToken,
-            ackAt: now
-          })
-          .catch(() => undefined)
+        queuePresenceUpdate({
+          roomId: snapshot.roomId,
+          playerId: localPlayerId,
+          playerName,
+          role: roomRole,
+          joinedAt: localJoinedAtRef.current,
+          pingToken: latestPingTokenRef.current || undefined,
+          pingAt: latestPingAtRef.current || undefined,
+          ackForPeerPingToken: peerPresence.pingToken,
+          ackAt: now
+        })
       }
 
       const hydrated = hydrateRoomState({
@@ -446,7 +509,7 @@ export default function App() {
         )
       }
     },
-    [actionCounter, flushOutboundQueue, localPlayerId, playerName, roomRole, roomStore]
+    [actionCounter, flushOutboundQueue, localPlayerId, playerName, queuePresenceUpdate, roomRole, roomStore]
   )
 
   const returnToLobby = useCallback(() => {
@@ -477,6 +540,14 @@ export default function App() {
     roomReadyRef.current = false
     outboundActionQueueRef.current = []
     outboundFlushInFlightRef.current = false
+    localJoinedAtRef.current = undefined
+    lastPresenceWriteAtRef.current = 0
+    pendingPresenceUpdateRef.current = null
+    presenceWriteInFlightRef.current = false
+    if (presenceWriteTimerRef.current !== null) {
+      window.clearTimeout(presenceWriteTimerRef.current)
+      presenceWriteTimerRef.current = null
+    }
   }, [localPlayerId, roomStore])
 
   const dispatchAndSync = useCallback(
@@ -538,6 +609,7 @@ export default function App() {
         actionRecords: []
       })
       setParticipantPresenceById({ [localPlayerId]: localPresence })
+      localJoinedAtRef.current = localPresence.joinedAt
       setConnectivityByPlayerId({ [localPlayerId]: true })
       setWaitingMessage('Waiting for opponent to connect...')
       setState(seeded.state)
@@ -612,6 +684,7 @@ export default function App() {
         roomReadyRef.current = false
         outboundActionQueueRef.current = []
         outboundFlushInFlightRef.current = false
+        localJoinedAtRef.current = undefined
         roomSlugRef.current = null
         setRoomSlug(null)
         setConnectedPeers([])
@@ -708,6 +781,16 @@ export default function App() {
   }, [roomSlug])
 
   useEffect(() => {
+    pendingPresenceUpdateRef.current = null
+    presenceWriteInFlightRef.current = false
+    lastPresenceWriteAtRef.current = 0
+    if (presenceWriteTimerRef.current !== null) {
+      window.clearTimeout(presenceWriteTimerRef.current)
+      presenceWriteTimerRef.current = null
+    }
+  }, [roomSlug])
+
+  useEffect(() => {
     if (roomSlug === null) {
       lastHydrationSignatureRef.current = ''
       lastPersistedStateSignatureRef.current = ''
@@ -765,26 +848,22 @@ export default function App() {
       const pingAt = Date.now()
       latestPingTokenRef.current = pingToken
       latestPingAtRef.current = pingAt
-      void roomStore
-        .touchPresence({
-          roomId: roomSlug,
-          playerId: localPlayerId,
-          playerName,
-          role: roomRole,
-          joinedAt: participantPresenceById[localPlayerId]?.joinedAt,
-          pingToken,
-          pingAt,
-          ackForPeerPingToken: acknowledgedPeerPingRef.current || undefined,
-          ackAt: latestAckAtRef.current || undefined
-        })
-        .catch((error) => {
-          setSyncError(error instanceof Error ? error.message : 'Failed to heartbeat room presence')
-        })
+      queuePresenceUpdate({
+        roomId: roomSlug,
+        playerId: localPlayerId,
+        playerName,
+        role: roomRole,
+        joinedAt: localJoinedAtRef.current,
+        pingToken,
+        pingAt,
+        ackForPeerPingToken: acknowledgedPeerPingRef.current || undefined,
+        ackAt: latestAckAtRef.current || undefined
+      })
     }
     void heartbeat()
     const timerId = window.setInterval(heartbeat, HEARTBEAT_MS)
     return () => window.clearInterval(timerId)
-  }, [localPlayerId, participantPresenceById, playerName, roomRole, roomSlug, roomStore])
+  }, [localPlayerId, playerName, queuePresenceUpdate, roomRole, roomSlug])
 
   useEffect(() => {
     if (autoJoinRef.current) return
@@ -819,6 +898,12 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      pendingPresenceUpdateRef.current = null
+      presenceWriteInFlightRef.current = false
+      if (presenceWriteTimerRef.current !== null) {
+        window.clearTimeout(presenceWriteTimerRef.current)
+        presenceWriteTimerRef.current = null
+      }
       const activeRoom = roomSlugRef.current
       if (!activeRoom) return
       void roomStore.leaveRoom(activeRoom, localPlayerId).catch(() => undefined)

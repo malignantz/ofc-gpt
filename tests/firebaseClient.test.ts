@@ -30,6 +30,7 @@ describe('firebaseClient config', () => {
 
 describe('firebaseClient requests', () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
   })
 
@@ -89,5 +90,38 @@ describe('firebaseClient requests', () => {
     await expect(client.requestJson('/roomDirectory')).rejects.toThrow(
       'Firebase request failed (401) for GET https://test-default-rtdb.firebaseio.com/roomDirectory.json'
     )
+  })
+
+  it('rate limits requests to at most one per second', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => '{}'
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = createFirebaseRestClient({
+      apiKey: 'key',
+      authDomain: 'test.firebaseapp.com',
+      databaseUrl: 'https://test-default-rtdb.firebaseio.com',
+      projectId: 'test',
+      appId: 'app'
+    })
+
+    await client.requestJson('/rooms/first')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    const secondRequest = client.requestJson('/rooms/second')
+    await Promise.resolve()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1)
+    await secondRequest
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

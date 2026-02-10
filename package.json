@@ -17,6 +17,7 @@
     "worker:dev": "wrangler dev worker/worker.ts --port 8787"
   },
   "dependencies": {
+    "firebase": "^12.9.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

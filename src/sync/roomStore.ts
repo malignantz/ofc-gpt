@@ -1,6 +1,7 @@
 import type { GameAction } from '../state/gameState'
 import { GameState, Player, initialGameState } from '../state/gameState'
 import { createFirebaseRestClient, FirebaseRestClient } from './firebaseClient'
+import { createFirebaseSdkClient } from './firebaseSdkClient'
 import { WAITING_OPPONENT_ID } from './constants'
 
 const ROOM_TTL_MS = 5 * 60 * 1000
@@ -146,8 +147,17 @@ function roomKey(roomId: string): string {
   return toFirebaseKey(roomId.trim().toLowerCase())
 }
 
+function toStoredActionKey(gameId: string, actionId: string): string {
+  return toFirebaseKey(`${gameId}__${toFirebaseKey(actionId)}`)
+}
+
 function isRecord(value: unknown): value is FirebaseRecordMap {
   return typeof value === 'object' && value !== null
+}
+
+function toError(error: unknown, fallbackMessage: string): Error {
+  if (error instanceof Error) return error
+  return new Error(fallbackMessage)
 }
 
 function asString(value: unknown): string | null {
@@ -358,8 +368,17 @@ export function buildPresenceUpdate(input: {
   return presence
 }
 
+function createDefaultFirebaseClient(): FirebaseRestClient {
+  try {
+    return createFirebaseSdkClient()
+  } catch (error) {
+    console.warn('[firebase] sdk client init failed, falling back to REST polling', error)
+    return createFirebaseRestClient()
+  }
+}
+
 export function createRoomStore(options?: StoreOptions): RoomStore {
-  const client = options?.client ?? createFirebaseRestClient()
+  const client = options?.client ?? createDefaultFirebaseClient()
   const now = options?.now ?? (() => Date.now())
   const timers = options?.timers ?? {
     setInterval: globalThis.setInterval.bind(globalThis),
@@ -862,8 +881,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
       return null
     }
     const gameId = meta.currentGameId
-    const actionId = toFirebaseKey(input.action.id)
-    const actionKey = toFirebaseKey(`${gameId}__${actionId}`)
+    const actionKey = toStoredActionKey(gameId, input.action.id)
     const existing = await client.requestJson<unknown>(
       `${withRoomPath(normalizedRoom)}/actions/${encodeURIComponent(actionKey)}`
     )
@@ -913,7 +931,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     return expiredRoomIds.length
   }
 
-  const subscribeRoomSnapshot = (
+  const subscribeRoomSnapshotPolling = (
     roomId: string,
     handlers: { onUpdate: (snapshot: RoomSnapshot) => void; onError?: (error: Error) => void }
   ): (() => void) => {
@@ -983,8 +1001,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
         handlers.onUpdate(snapshot)
       } catch (error) {
         if (!active) return
-        const normalized = error instanceof Error ? error : new Error('Failed to fetch room snapshot')
-        handlers.onError?.(normalized)
+        handlers.onError?.(toError(error, 'Failed to fetch room snapshot'))
       }
     }
     void run()
@@ -997,7 +1014,184 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     }
   }
 
-  const subscribeRoomDirectory = (
+  const subscribeRoomSnapshotRealtime = (
+    roomId: string,
+    handlers: { onUpdate: (snapshot: RoomSnapshot) => void; onError?: (error: Error) => void }
+  ): (() => void) => {
+    let active = true
+    let fallbackTriggered = false
+    let fallbackUnsubscribe: (() => void) | null = null
+    const realtimeUnsubscribers: Array<() => void> = []
+    let cachedMeta: RoomMeta | null = null
+    let cachedParticipants: ParticipantPresence[] = []
+    let cachedGameState: GameState | null = null
+    let currentGameId: string | null = null
+    const actionsByKey = new Map<string, ActionRecord>()
+
+    const emitSnapshot = (includeGameState: boolean) => {
+      if (!active || fallbackTriggered) return
+      handlers.onUpdate({
+        roomId: roomKey(roomId),
+        meta: cachedMeta,
+        participants: cachedParticipants,
+        actions: dedupeActionRecords(sortActions([...actionsByKey.values()])),
+        gameState: includeGameState ? cachedGameState : null,
+        gameStateIncluded: includeGameState
+      })
+    }
+
+    const triggerFallback = (error: unknown) => {
+      if (!active || fallbackTriggered) return
+      fallbackTriggered = true
+      const normalized = toError(error, 'Realtime room snapshot subscription failed; falling back to polling.')
+      console.warn('[firebase] room snapshot realtime failed; using polling fallback', normalized)
+      handlers.onError?.(normalized)
+      realtimeUnsubscribers.forEach((unsubscribe) => unsubscribe())
+      realtimeUnsubscribers.length = 0
+      fallbackUnsubscribe = subscribeRoomSnapshotPolling(roomId, handlers)
+    }
+
+    const applyActionValue = (actionKey: string, value: unknown) => {
+      if (!currentGameId) {
+        actionsByKey.delete(actionKey)
+        return
+      }
+      const parsed = parseActionRecords({ [actionKey]: value }, currentGameId)
+      if (parsed.length === 0) {
+        actionsByKey.delete(actionKey)
+        return
+      }
+      const first = parsed[0]
+      if (!first) return
+      actionsByKey.set(actionKey, first)
+    }
+
+    const refreshForSession = async (nextGameId: string) => {
+      currentGameId = nextGameId
+      actionsByKey.clear()
+      const refreshedActions = await fetchActions(roomId, nextGameId)
+      for (const record of refreshedActions) {
+        actionsByKey.set(toStoredActionKey(record.gameId, record.id), record)
+      }
+      cachedGameState = await fetchPersistedGameState(roomId)
+    }
+
+    const bootstrap = async () => {
+      try {
+        const initial = await fetchRoomSnapshot(roomId)
+        if (!active || fallbackTriggered) return
+        cachedMeta = initial.meta
+        cachedParticipants = initial.participants
+        cachedGameState = initial.gameState
+        currentGameId = initial.meta?.currentGameId ?? null
+        actionsByKey.clear()
+        initial.actions.forEach((record) => {
+          actionsByKey.set(toStoredActionKey(record.gameId, record.id), record)
+        })
+        emitSnapshot(true)
+      } catch (error) {
+        triggerFallback(error)
+        return
+      }
+
+      try {
+        if (!client.subscribeValue || !client.subscribeChild) throw new Error('Realtime subscriptions are unavailable.')
+        realtimeUnsubscribers.push(
+          client.subscribeValue(`${withRoomPath(roomId)}/meta`, {
+            onValue: (rawMeta) => {
+              void (async () => {
+                try {
+                  const nextMeta = await parseAndMaybeMigrateMeta(roomId, rawMeta)
+                  if (!active || fallbackTriggered) return
+                  const previousGameId = currentGameId
+                  cachedMeta = nextMeta
+                  if (!nextMeta) {
+                    cachedParticipants = []
+                    cachedGameState = null
+                    currentGameId = null
+                    actionsByKey.clear()
+                    emitSnapshot(true)
+                    return
+                  }
+                  if (previousGameId && previousGameId !== nextMeta.currentGameId) {
+                    await refreshForSession(nextMeta.currentGameId)
+                    if (!active || fallbackTriggered) return
+                    emitSnapshot(true)
+                    return
+                  }
+                  currentGameId = nextMeta.currentGameId
+                  emitSnapshot(false)
+                } catch (error) {
+                  triggerFallback(error)
+                }
+              })()
+            },
+            onError: (error) => triggerFallback(error)
+          })
+        )
+        realtimeUnsubscribers.push(
+          client.subscribeValue(`${withRoomPath(roomId)}/participants`, {
+            onValue: (rawParticipants) => {
+              try {
+                cachedParticipants = parseParticipants(rawParticipants)
+                emitSnapshot(false)
+              } catch (error) {
+                triggerFallback(error)
+              }
+            },
+            onError: (error) => triggerFallback(error)
+          })
+        )
+        realtimeUnsubscribers.push(
+          client.subscribeChild(`${withRoomPath(roomId)}/actions`, {
+            onAdded: (key, value) => {
+              try {
+                applyActionValue(key, value)
+                emitSnapshot(false)
+              } catch (error) {
+                triggerFallback(error)
+              }
+            },
+            onChanged: (key, value) => {
+              try {
+                applyActionValue(key, value)
+                emitSnapshot(false)
+              } catch (error) {
+                triggerFallback(error)
+              }
+            },
+            onRemoved: (key) => {
+              actionsByKey.delete(key)
+              emitSnapshot(false)
+            },
+            onError: (error) => triggerFallback(error)
+          })
+        )
+      } catch (error) {
+        triggerFallback(error)
+      }
+    }
+
+    void bootstrap()
+
+    return () => {
+      active = false
+      realtimeUnsubscribers.forEach((unsubscribe) => unsubscribe())
+      fallbackUnsubscribe?.()
+    }
+  }
+
+  const subscribeRoomSnapshot = (
+    roomId: string,
+    handlers: { onUpdate: (snapshot: RoomSnapshot) => void; onError?: (error: Error) => void }
+  ): (() => void) => {
+    if (client.supportsRealtime && client.subscribeValue && client.subscribeChild) {
+      return subscribeRoomSnapshotRealtime(roomId, handlers)
+    }
+    return subscribeRoomSnapshotPolling(roomId, handlers)
+  }
+
+  const subscribeRoomDirectoryPolling = (
     handlers: { onUpdate: (rooms: RoomDirectoryEntry[]) => void; onError?: (error: Error) => void }
   ): (() => void) => {
     let active = true
@@ -1009,8 +1203,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
         handlers.onUpdate(rooms)
       } catch (error) {
         if (!active) return
-        const normalized = error instanceof Error ? error : new Error('Failed to fetch room directory')
-        handlers.onError?.(normalized)
+        handlers.onError?.(toError(error, 'Failed to fetch room directory'))
       }
     }
     const runCleanup = async () => {
@@ -1034,6 +1227,86 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
       timers.clearInterval(pollTimer)
       timers.clearInterval(cleanupTimer)
     }
+  }
+
+  const subscribeRoomDirectoryRealtime = (
+    handlers: { onUpdate: (rooms: RoomDirectoryEntry[]) => void; onError?: (error: Error) => void }
+  ): (() => void) => {
+    let active = true
+    let fallbackTriggered = false
+    let fallbackUnsubscribe: (() => void) | null = null
+
+    const emitRooms = (directoryNode: unknown) => {
+      if (!active || fallbackTriggered) return
+      if (!isRecord(directoryNode)) {
+        handlers.onUpdate([])
+        return
+      }
+      const rooms: RoomDirectoryEntry[] = []
+      for (const value of Object.values(directoryNode)) {
+        const parsed = parseDirectoryEntry(value)
+        if (parsed) rooms.push(parsed)
+      }
+      handlers.onUpdate(filterActiveRoomDirectory(rooms, now()))
+    }
+
+    const triggerFallback = (error: unknown) => {
+      if (!active || fallbackTriggered) return
+      fallbackTriggered = true
+      const normalized = toError(error, 'Realtime room directory subscription failed; falling back to polling.')
+      console.warn('[firebase] room directory realtime failed; using polling fallback', normalized)
+      handlers.onError?.(normalized)
+      timers.clearInterval(cleanupTimer)
+      unsubscribeValue?.()
+      fallbackUnsubscribe = subscribeRoomDirectoryPolling(handlers)
+    }
+
+    const runCleanup = async () => {
+      if (!active || fallbackTriggered) return
+      try {
+        await cleanupExpiredRooms()
+      } catch {
+        // Best-effort cleanup in v1.
+      }
+    }
+
+    const cleanupTimer = timers.setInterval(() => {
+      void runCleanup()
+    }, DIRECTORY_CLEANUP_MS)
+    void runCleanup()
+
+    let unsubscribeValue: (() => void) | null = null
+    try {
+      if (!client.subscribeValue) throw new Error('Realtime subscriptions are unavailable.')
+      unsubscribeValue = client.subscribeValue('/roomDirectory', {
+        onValue: (directoryNode) => {
+          try {
+            emitRooms(directoryNode)
+          } catch (error) {
+            triggerFallback(error)
+          }
+        },
+        onError: (error) => triggerFallback(error)
+      })
+    } catch (error) {
+      triggerFallback(error)
+    }
+
+    return () => {
+      active = false
+      timers.clearInterval(cleanupTimer)
+      unsubscribeValue?.()
+      fallbackUnsubscribe?.()
+    }
+  }
+
+  const subscribeRoomDirectory = (
+    handlers: { onUpdate: (rooms: RoomDirectoryEntry[]) => void; onError?: (error: Error) => void }
+  ): (() => void) => {
+    if (client.supportsRealtime && client.subscribeValue) {
+      return subscribeRoomDirectoryRealtime(handlers)
+    }
+    return subscribeRoomDirectoryPolling(handlers)
   }
 
   return {

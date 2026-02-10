@@ -34,6 +34,7 @@ export type TransportStatsSnapshot = {
 }
 
 const STORE_KEY = '__ofc_transport_usage_store__'
+const LOGGING_KEY = '__ofc_transport_logging_enabled__'
 const encoder = new TextEncoder()
 
 function createBucket(): TransportBucket {
@@ -104,6 +105,32 @@ function normalizeRequests(value: number | undefined): number {
   return Math.max(1, Math.round(value))
 }
 
+function readEnvValue(key: string): string | undefined {
+  return (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.[key]
+}
+
+function parseBoolean(value: string | undefined): boolean | null {
+  if (!value) return null
+  const normalized = value.trim().toLowerCase()
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on') return true
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') return false
+  return null
+}
+
+function defaultLoggingEnabled(): boolean {
+  const explicit = parseBoolean(readEnvValue('VITE_TRANSPORT_LOGGING'))
+  if (explicit !== null) return explicit
+  const mode = readEnvValue('MODE')
+  return mode !== 'test'
+}
+
+function isConsoleLoggingEnabled(): boolean {
+  const root = globalThis as unknown as Record<string, unknown>
+  const override = root[LOGGING_KEY]
+  if (typeof override === 'boolean') return override
+  return defaultLoggingEnabled()
+}
+
 export function byteLengthUtf8(value: string): number {
   return encoder.encode(value).length
 }
@@ -172,6 +199,8 @@ export function logTransportUsage(input: TransportUsageInput) {
   const channelAverage = safeAverage(channelBucket.totalBytes, channelBucket.totalRequests)
   const eventAverage = safeAverage(eventBytes, requests)
 
+  if (!isConsoleLoggingEnabled()) return
+
   console.info(
     `[transport] ${input.direction} ${input.channel}: ${input.description} | ` +
       `event ${formatBytes(eventBytes)} across ${requests} request${requests === 1 ? '' : 's'} ` +
@@ -205,6 +234,7 @@ export function resetTransportUsageStats() {
 type WindowWithTransportHelpers = Window & {
   __ofcTransportStats?: () => TransportStatsSnapshot
   __ofcTransportReset?: () => void
+  __ofcTransportLogging?: (enabled: boolean) => void
 }
 
 function installWindowTransportHelpers() {
@@ -221,6 +251,13 @@ function installWindowTransportHelpers() {
     target.__ofcTransportReset = () => {
       resetTransportUsageStats()
       console.info('[transport] stats reset')
+    }
+  }
+  if (typeof target.__ofcTransportLogging !== 'function') {
+    target.__ofcTransportLogging = (enabled: boolean) => {
+      const root = globalThis as unknown as Record<string, unknown>
+      root[LOGGING_KEY] = Boolean(enabled)
+      console.info(`[transport] per-event logging ${enabled ? 'enabled' : 'disabled'}`)
     }
   }
 }
