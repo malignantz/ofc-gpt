@@ -154,6 +154,16 @@ function isCpuLocalState(state: GameState, localPlayerId: string): boolean {
   return Boolean(local && cpu && state.players.length === 2)
 }
 
+export function resolveCpuSessionForLocalPlayer(
+  session: CpuLocalSession | null,
+  localPlayerId: string
+): CpuLocalSession | null {
+  if (!session) return null
+  if (session.localPlayerId !== localPlayerId) return null
+  if (!isCpuLocalState(session.state, localPlayerId)) return null
+  return session
+}
+
 function getParamInsensitive(params: URLSearchParams, key: string): string | null {
   const lowered = key.toLowerCase()
   for (const [k, value] of params.entries()) {
@@ -686,6 +696,11 @@ export default function App() {
       clearRoomCache(previousRoom)
     }
 
+    const session = resolveCpuSessionForLocalPlayer(readCpuLocalSession(), localPlayerId)
+    if (!session) {
+      clearCpuLocalSession()
+    }
+
     const localPlayer: Player = {
       id: localPlayerId,
       name: playerName,
@@ -701,9 +716,8 @@ export default function App() {
       ready: false
     }
 
-    const localState = initialGameState([localPlayer, cpuPlayer])
-    actionCounter.value = seedActionCounterFromLog(localState.actionLog, localPlayerId, 0)
-    clearCpuLocalSession()
+    const localState = session ? session.state : initialGameState([localPlayer, cpuPlayer])
+    actionCounter.value = seedActionCounterFromLog(localState.actionLog, localPlayerId, session?.actionCounter ?? 0)
 
     roomSlugRef.current = null
     setRoomSlug(null)
@@ -1063,53 +1077,6 @@ export default function App() {
   useEffect(() => {
     writeLocalPlayerName(playerName)
   }, [playerName])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    if (state || view !== 'lobby') return
-
-    const params = new URLSearchParams(window.location.search)
-    const pathRoom = window.location.pathname.replace(/^\//, '')
-    const roomFromUrl = getParamInsensitive(params, 'room') ?? (pathRoom.length > 0 ? decodeURIComponent(pathRoom) : null)
-    if (roomFromUrl) return
-
-    const session = readCpuLocalSession()
-    if (!session) return
-    if (session.localPlayerId !== localPlayerId || !isCpuLocalState(session.state, localPlayerId)) {
-      clearCpuLocalSession()
-      return
-    }
-
-    actionCounter.value = seedActionCounterFromLog(session.state.actionLog, localPlayerId, session.actionCounter)
-    roomSlugRef.current = null
-    setRoomSlug(null)
-    setGameMode('cpu_local')
-    setView('table')
-    setRoomRole('host')
-    setPlayerCount(2)
-    setConnectedPeers([CPU_BOT_ID])
-    setParticipantPresenceById({})
-    setConnectivityByPlayerId({ [localPlayerId]: true, [CPU_BOT_ID]: true })
-    setWaitingMessage(null)
-    setSyncError(null)
-    setJoining(false)
-    setState(session.state)
-    lastHydrationSignatureRef.current = ''
-    lastPersistedStateSignatureRef.current = ''
-    latestPingTokenRef.current = ''
-    latestPingAtRef.current = 0
-    latestAckAtRef.current = 0
-    acknowledgedPeerPingRef.current = ''
-    bootstrapInProgressRef.current = false
-    bootstrapRoomRef.current = null
-    bootstrapStartedAtRef.current = 0
-    activeGameIdRef.current = null
-    activeActionsVersionRef.current = 0
-    roomReadyRef.current = false
-    outboundActionQueueRef.current = []
-    outboundFlushInFlightRef.current = false
-    localJoinedAtRef.current = undefined
-  }, [actionCounter, localPlayerId, state, view])
 
   useEffect(() => {
     if (gameMode !== 'cpu_local' || !state) return
@@ -1846,7 +1813,6 @@ export default function App() {
             dispatchBatchAndSync(actions)
           }}
           onResetRound={resetRoundAndSync}
-          onLeaveGame={gameMode === 'cpu_local' ? returnToLobby : undefined}
           canStartNextRound={canStartNextRound}
           nextRoundLabel={nextRoundLabel}
           nextRoundHint={nextRoundHint}
