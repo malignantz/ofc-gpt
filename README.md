@@ -39,7 +39,6 @@ This repo is intentionally designed to showcase engineering judgment, not just f
 
 ### Production Delivery
 - Frontend deployed to Cloudflare Pages.
-- Optional signaling worker path (Cloudflare Durable Objects) retained for alternate transport architecture.
 - Automated test suite covering engine, sync, cache, and realtime behavior.
 
 ## Architecture (High-Level)
@@ -51,14 +50,13 @@ graph TD
   STORE --> REST["Firebase REST Fallback Client"]
   STORE --> RTDB["Room Meta + Presence + Actions + Snapshot"]
   UI --> CACHE["Local Reconnect Cache"]
-  WORKER["Cloudflare Worker (optional signaling path)"] --> UI
   PAGES["Cloudflare Pages"] --> UI
 ```
 
 ## Tech Stack
 - Frontend: React 18, TypeScript, Vite
 - Realtime/Data: Firebase Realtime Database
-- Infra: Cloudflare Pages, Wrangler
+- Infra: Cloudflare Pages
 - Testing: Vitest
 - Linting: ESLint
 
@@ -77,11 +75,8 @@ src/
   state/    # game state types and pure reducer
   sync/     # Firebase clients, room store, hydration, local cache
   ui/       # App, lobby, game table, UX utilities
-  net/      # signaling/protocol/WebRTC modules
   crypto/   # commit/reveal + deterministic RNG helpers
   utils/    # transport usage instrumentation
-worker/
-  worker.ts # Durable Object signaling worker
 tests/
   *.test.ts(x)
 ```
@@ -122,11 +117,6 @@ VITE_TRANSPORT_LOGGING=true
 ```bash
 npm run build
 npx wrangler pages deploy dist --project-name ofc-gpt --branch main
-```
-
-### Cloudflare Worker (optional signaling path)
-```bash
-npx wrangler deploy
 ```
 
 ## Notes

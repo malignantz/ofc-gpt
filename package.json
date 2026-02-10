@@ -13,8 +13,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint .",
-    "worker:dev": "wrangler dev worker/worker.ts --port 8787"
+    "lint": "eslint ."
   },
   "dependencies": {
     "firebase": "^12.9.0",
@@ -22,7 +21,6 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20241011.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.2",
@@ -31,7 +29,6 @@
     "eslint-plugin-react-refresh": "^0.4.7",
     "typescript": "^5.5.4",
     "vite": "^7.3.1",
-    "vitest": "^3.0.5",
-    "wrangler": "^4.63.0"
+    "vitest": "^3.0.5"
   }
 }
