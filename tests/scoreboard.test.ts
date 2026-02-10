@@ -41,6 +41,34 @@ describe('scoreboard utils', () => {
     })
   })
 
+  it('includes CPU opponent entries in scoreboard aggregation', () => {
+    const entries = extractScoreboardEntries({
+      p1: {
+        rivals: {
+          __cpu_bot__: {
+            opponentId: '__cpu_bot__',
+            name: 'CPU',
+            total: 11,
+            wins: 3,
+            losses: 1,
+            ties: 0,
+            updatedAt: 200
+          }
+        }
+      }
+    })
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      opponentId: '__cpu_bot__',
+      name: 'CPU',
+      total: 11,
+      wins: 3,
+      losses: 1,
+      ties: 0
+    })
+  })
+
   it('returns empty array on invalid localStorage payload', () => {
     const entries = readScoreboardEntriesFromLocalStorage({
       getItem: () => '{not-json'
@@ -48,4 +76,3 @@ describe('scoreboard utils', () => {
     expect(entries).toEqual([])
   })
 })
-

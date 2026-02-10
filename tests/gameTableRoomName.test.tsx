@@ -79,6 +79,7 @@ describe('GameTable room name display', () => {
     expect(html).toContain('Foul: Middle')
     expect(html).toContain('Foul: Bottom')
   })
+
 })
 
 function scoreState(linesByPlayer: {
