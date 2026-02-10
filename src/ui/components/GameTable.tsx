@@ -1,18 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import type { Card as PlayingCard } from '../../engine/cards'
-import { cardToString, stringToCard } from '../../engine/cards'
+import { cardToString, rankValue, stringToCard } from '../../engine/cards'
 import { evaluateFive, evaluateThree } from '../../engine/handEval'
 import { analyzeFoul, type FoulAnalysis } from '../../engine/validation'
 import { GameState, LinesState } from '../../state/gameState'
 import { royaltiesBreakdown, scoreHeadsUpDetailed, type HeadsUpDetailedResult } from '../../engine/scoring'
 import { RIVALRY_STORE_KEY } from '../utils/scoreboard'
-import {
-  buildDraftCardPoolSignature,
-  buildInitialDraftStorageKey,
-  clearInitialDraftSnapshot,
-  readInitialDraftSnapshot,
-  writeInitialDraftSnapshot
-} from '../utils/initialDraftStorage'
 import { Card } from './Card'
 
 type DraftLines = {
@@ -43,8 +36,19 @@ type RivalryStoreEntry = {
 type RivalryStore = Record<string, RivalryStoreEntry>
 
 const TAP_PLACEMENT_HINT_DISMISSED_KEY = 'ofc:tap-placement-hint-dismissed-v1'
+const INITIAL_DRAFT_STORE_PREFIX = 'ofc:initial-draft-v1'
 const DRAFT_LINE_KEYS: Array<keyof LinesState> = ['top', 'middle', 'bottom']
 const LINE_LIMITS: Record<keyof LinesState, number> = { top: 3, middle: 5, bottom: 5 }
+const SUIT_ORDER: Record<PlayingCard['suit'], number> = { S: 0, H: 1, D: 2, C: 3 }
+
+type PersistedInitialDraft = {
+  version: 1
+  roundKey: string | null
+  baseSignature: string
+  draftLines: DraftLines
+  draftPending: string[]
+  savedAt: number
+}
 
 export function forcedLineFromLengths(
   lengths: Record<keyof LinesState, number>
@@ -56,6 +60,229 @@ export function forcedLineFromLengths(
 
 export function draftSnapshotSignature(lines: DraftLines, pending: string[]): string {
   return `${lines.top.join(',')}|${lines.middle.join(',')}|${lines.bottom.join(',')}|${pending.join(',')}`
+}
+
+function buildInitialDraftStorageKey(localPlayerId: string, roomName?: string): string {
+  const scope = roomName && roomName.trim().length > 0 ? `room:${roomName}` : 'cpu-local'
+  return `${INITIAL_DRAFT_STORE_PREFIX}:${scope}:${localPlayerId}`
+}
+
+function normalizeDraftLines(value: unknown): DraftLines | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Partial<Record<keyof LinesState, unknown>>
+  const top = normalizeCardList(raw.top)
+  const middle = normalizeCardList(raw.middle)
+  const bottom = normalizeCardList(raw.bottom)
+  if (!top || !middle || !bottom) return null
+  if (top.length > LINE_LIMITS.top || middle.length > LINE_LIMITS.middle || bottom.length > LINE_LIMITS.bottom) {
+    return null
+  }
+  return { top, middle, bottom }
+}
+
+function normalizeCardList(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  if (!value.every((item) => typeof item === 'string' && item.length > 0)) return null
+  return [...value]
+}
+
+function cardFrequency(cards: string[]): Record<string, number> {
+  const counts: Record<string, number> = {}
+  for (const card of cards) {
+    counts[card] = (counts[card] ?? 0) + 1
+  }
+  return counts
+}
+
+function sameCardMultiset(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false
+  const leftCounts = cardFrequency(left)
+  const rightCounts = cardFrequency(right)
+  const keys = new Set([...Object.keys(leftCounts), ...Object.keys(rightCounts)])
+  for (const key of keys) {
+    if ((leftCounts[key] ?? 0) !== (rightCounts[key] ?? 0)) return false
+  }
+  return true
+}
+
+function toDraftCardPool(lines: DraftLines, pending: string[]): string[] {
+  return [...lines.top, ...lines.middle, ...lines.bottom, ...pending]
+}
+
+export function resolvePersistedInitialDraft(input: {
+  persisted: unknown
+  roundKey: string | null
+  baseSignature: string
+  authoritativeLines: DraftLines
+  authoritativePending: string[]
+}): { draftLines: DraftLines; draftPending: string[] } | null {
+  const { persisted, roundKey, baseSignature, authoritativeLines, authoritativePending } = input
+  if (!persisted || typeof persisted !== 'object') return null
+
+  const raw = persisted as Partial<PersistedInitialDraft>
+  if (raw.version !== 1) return null
+  if ((raw.roundKey ?? null) !== roundKey) return null
+  if (raw.baseSignature !== baseSignature) return null
+
+  const draftLines = normalizeDraftLines(raw.draftLines)
+  const draftPending = normalizeCardList(raw.draftPending)
+  if (!draftLines || !draftPending) return null
+
+  const authoritativePool = toDraftCardPool(authoritativeLines, authoritativePending)
+  const draftPool = toDraftCardPool(draftLines, draftPending)
+  if (!sameCardMultiset(draftPool, authoritativePool)) return null
+
+  return { draftLines, draftPending }
+}
+
+export function sortLineCardsForDisplay(line: keyof LinesState, cards: string[]): string[] {
+  const targetLength = line === 'top' ? 3 : 5
+  if (cards.length !== targetLength) return cards
+  try {
+    const parsed = cards.map(stringToCard)
+    const sorted = line === 'top' ? sortThreeCardLine(parsed) : sortFiveCardLine(parsed)
+    return sorted.map(cardToString)
+  } catch {
+    return cards
+  }
+}
+
+export function handRankLabelForDisplay(line: keyof LinesState, cards: string[]): string | null {
+  const targetLength = line === 'top' ? 3 : 5
+  if (cards.length !== targetLength) return null
+  try {
+    return handRankNameForLine(line, cards.map(stringToCard))
+  } catch {
+    return null
+  }
+}
+
+function readPersistedInitialDraft(storageKey: string): unknown {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw) return null
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+function writePersistedInitialDraft(storageKey: string, value: PersistedInitialDraft) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(value))
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
+function clearPersistedInitialDraft(storageKey: string) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.removeItem(storageKey)
+  } catch {
+    // Ignore storage remove failures.
+  }
+}
+
+function sortCardsByRankDesc(cards: PlayingCard[]): PlayingCard[] {
+  return [...cards].sort((a, b) => {
+    const rankDiff = rankValue(b.rank) - rankValue(a.rank)
+    if (rankDiff !== 0) return rankDiff
+    return SUIT_ORDER[a.suit] - SUIT_ORDER[b.suit]
+  })
+}
+
+function groupCardsByRank(cards: PlayingCard[]): Map<number, PlayingCard[]> {
+  const groups = new Map<number, PlayingCard[]>()
+  for (const card of cards) {
+    const rank = rankValue(card.rank)
+    const group = groups.get(rank) ?? []
+    group.push(card)
+    groups.set(rank, group)
+  }
+  for (const [rank, group] of groups.entries()) {
+    groups.set(
+      rank,
+      [...group].sort((a, b) => SUIT_ORDER[a.suit] - SUIT_ORDER[b.suit])
+    )
+  }
+  return groups
+}
+
+function cardsForRank(groups: Map<number, PlayingCard[]>, rank: number): PlayingCard[] {
+  return [...(groups.get(rank) ?? [])]
+}
+
+function sortStraightCardsAscending(cards: PlayingCard[], highCard: number): PlayingCard[] {
+  const groups = groupCardsByRank(cards)
+  const order = highCard === 5 ? [14, 2, 3, 4, 5] : [highCard - 4, highCard - 3, highCard - 2, highCard - 1, highCard]
+  const ordered: PlayingCard[] = []
+  for (const rank of order) {
+    const card = cardsForRank(groups, rank)[0]
+    if (!card) return sortCardsByRankDesc(cards)
+    ordered.push(card)
+  }
+  return ordered
+}
+
+function sortFiveCardLine(cards: PlayingCard[]): PlayingCard[] {
+  const hand = evaluateFive(cards)
+  const groups = groupCardsByRank(cards)
+  const restDescending = (exclude: number[]) =>
+    [...groups.keys()]
+      .filter((rank) => !exclude.includes(rank))
+      .sort((a, b) => b - a)
+      .flatMap((rank) => cardsForRank(groups, rank))
+
+  switch (hand.category) {
+    case 8:
+    case 4:
+      return sortStraightCardsAscending(cards, hand.kickers[0] ?? 0)
+    case 7: {
+      const quad = hand.kickers[0] ?? 0
+      return [...cardsForRank(groups, quad), ...restDescending([quad])]
+    }
+    case 6: {
+      const triple = hand.kickers[0] ?? 0
+      const pair = hand.kickers[1] ?? 0
+      return [...cardsForRank(groups, triple), ...cardsForRank(groups, pair)]
+    }
+    case 3: {
+      const triple = hand.kickers[0] ?? 0
+      return [...cardsForRank(groups, triple), ...restDescending([triple])]
+    }
+    case 2: {
+      const pairHigh = hand.kickers[0] ?? 0
+      const pairLow = hand.kickers[1] ?? 0
+      return [...cardsForRank(groups, pairHigh), ...cardsForRank(groups, pairLow), ...restDescending([pairHigh, pairLow])]
+    }
+    case 1: {
+      const pair = hand.kickers[0] ?? 0
+      return [...cardsForRank(groups, pair), ...restDescending([pair])]
+    }
+    case 5:
+    case 0:
+    default:
+      return sortCardsByRankDesc(cards)
+  }
+}
+
+function sortThreeCardLine(cards: PlayingCard[]): PlayingCard[] {
+  const hand = evaluateThree(cards)
+  const groups = groupCardsByRank(cards)
+  if (hand.category === 2) {
+    return sortCardsByRankDesc(cards)
+  }
+  if (hand.category === 1) {
+    const pair = hand.kickers[0] ?? 0
+    return [
+      ...cardsForRank(groups, pair),
+      ...[...groups.keys()].filter((rank) => rank !== pair).sort((a, b) => b - a).flatMap((rank) => cardsForRank(groups, rank))
+    ]
+  }
+  return sortCardsByRankDesc(cards)
 }
 
 export type GameTableProps = {
@@ -103,23 +330,16 @@ export function GameTable({
   const autoPlayPlacementKeyRef = useRef('')
   const autoInitialSubmitKeyRef = useRef('')
   const initialHydrationSignatureRef = useRef('')
-  const initialDraftHydratedRef = useRef(false)
-  const draftStorageKey = useMemo(
-    () => buildInitialDraftStorageKey({ roomName, playerId: localPlayerId }),
+  const initialDraftStorageKey = useMemo(
+    () => buildInitialDraftStorageKey(localPlayerId, roomName),
     [localPlayerId, roomName]
   )
+  const currentRoundKey = useMemo(() => getCurrentRoundKey(state), [state])
 
   useEffect(() => {
     if (state.phase !== 'initial') {
       initialHydrationSignatureRef.current = ''
-      initialDraftHydratedRef.current = false
-      if (typeof window !== 'undefined') {
-        try {
-          clearInitialDraftSnapshot(window.localStorage, draftStorageKey)
-        } catch {
-          // Ignore storage remove failures.
-        }
-      }
+      clearPersistedInitialDraft(initialDraftStorageKey)
       setDraftPending([])
       setDraftLines({ top: [], middle: [], bottom: [] })
       return
@@ -136,64 +356,57 @@ export function GameTable({
       (localLines?.middle?.length ?? 0) +
       (localLines?.bottom?.length ?? 0)
     setSubmittedInitial(pending.length === 0 && placed === 5)
-    if (initialHydrationSignatureRef.current === nextSignature) return
-    initialHydrationSignatureRef.current = nextSignature
-    let hydratedLines = nextDraftLines
-    let hydratedPending = nextDraftPending
-    const shouldRestoreStoredDraft = placed === 0 && nextDraftPending.length > 0
-    if (shouldRestoreStoredDraft && typeof window !== 'undefined') {
-      try {
-        const sourceCardPoolSignature = buildDraftCardPoolSignature({
-          lines: nextDraftLines,
-          pending: nextDraftPending
-        })
-        const restored = readInitialDraftSnapshot(
-          window.localStorage,
-          draftStorageKey,
-          sourceCardPoolSignature
-        )
-        if (restored) {
-          hydratedLines = restored.lines
-          hydratedPending = restored.pending
-        }
-      } catch {
-        // Ignore storage read failures.
-      }
+
+    const persisted = readPersistedInitialDraft(initialDraftStorageKey)
+    const restored = resolvePersistedInitialDraft({
+      persisted,
+      roundKey: currentRoundKey,
+      baseSignature: nextSignature,
+      authoritativeLines: nextDraftLines,
+      authoritativePending: nextDraftPending
+    })
+    if (!restored && persisted) {
+      clearPersistedInitialDraft(initialDraftStorageKey)
     }
-    initialDraftHydratedRef.current = true
-    setDraftLines(hydratedLines)
-    setDraftPending(hydratedPending)
-  }, [draftStorageKey, localLines, pending, state.phase])
+    const hydratedDraftLines = restored?.draftLines ?? nextDraftLines
+    const hydratedDraftPending = restored?.draftPending ?? nextDraftPending
+    const hydratedSignature = draftSnapshotSignature(hydratedDraftLines, hydratedDraftPending)
+    if (initialHydrationSignatureRef.current === hydratedSignature) return
+    initialHydrationSignatureRef.current = hydratedSignature
+    setDraftLines(hydratedDraftLines)
+    setDraftPending(hydratedDraftPending)
+  }, [currentRoundKey, initialDraftStorageKey, localLines, pending, state.phase])
 
   useEffect(() => {
-    if (!initialDraftHydratedRef.current) return
-    if (typeof window === 'undefined') return
-    try {
-      if (state.phase !== 'initial' || submittedInitial) {
-        clearInitialDraftSnapshot(window.localStorage, draftStorageKey)
-        return
-      }
-      const hasAnyDraftCards =
-        draftPending.length > 0 ||
-        draftLines.top.length > 0 ||
-        draftLines.middle.length > 0 ||
-        draftLines.bottom.length > 0
-      if (!hasAnyDraftCards) {
-        clearInitialDraftSnapshot(window.localStorage, draftStorageKey)
-        return
-      }
-      writeInitialDraftSnapshot(window.localStorage, draftStorageKey, {
-        lines: {
-          top: [...draftLines.top],
-          middle: [...draftLines.middle],
-          bottom: [...draftLines.bottom]
-        },
-        pending: [...draftPending]
-      })
-    } catch {
-      // Ignore storage write failures.
+    if (state.phase !== 'initial' || submittedInitial) {
+      clearPersistedInitialDraft(initialDraftStorageKey)
+      return
     }
-  }, [draftLines, draftPending, draftStorageKey, state.phase, submittedInitial])
+    if (!initialHydrationSignatureRef.current) return
+    const authoritativeLines: DraftLines = {
+      top: (localLines?.top ?? []).map(cardToString),
+      middle: (localLines?.middle ?? []).map(cardToString),
+      bottom: (localLines?.bottom ?? []).map(cardToString)
+    }
+    const authoritativePending = pending.map(cardToString)
+    writePersistedInitialDraft(initialDraftStorageKey, {
+      version: 1,
+      roundKey: currentRoundKey,
+      baseSignature: draftSnapshotSignature(authoritativeLines, authoritativePending),
+      draftLines,
+      draftPending,
+      savedAt: Date.now()
+    })
+  }, [
+    currentRoundKey,
+    draftLines,
+    draftPending,
+    initialDraftStorageKey,
+    localLines,
+    pending,
+    state.phase,
+    submittedInitial
+  ])
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
@@ -835,6 +1048,7 @@ export function GameTable({
               <div className="line-stack">
                 <Line
                   label="Top"
+                  lineKey="top"
                   cards={state.lines[player.id]?.top ?? []}
                   fourColor={fourColor}
                   size="small"
@@ -847,6 +1061,7 @@ export function GameTable({
                 />
                 <Line
                   label="Middle"
+                  lineKey="middle"
                   cards={state.lines[player.id]?.middle ?? []}
                   fourColor={fourColor}
                   size="small"
@@ -859,6 +1074,7 @@ export function GameTable({
                 />
                 <Line
                   label="Bottom"
+                  lineKey="bottom"
                   cards={state.lines[player.id]?.bottom ?? []}
                   fourColor={fourColor}
                   size="small"
@@ -891,6 +1107,7 @@ export function GameTable({
 
 function Line({
   label,
+  lineKey,
   cards,
   fourColor,
   size = 'normal',
@@ -899,6 +1116,7 @@ function Line({
   showScore
 }: {
   label: string
+  lineKey: keyof LinesState
   cards: PlayingCard[]
   fourColor?: boolean
   size?: 'normal' | 'small'
@@ -907,15 +1125,19 @@ function Line({
   showScore?: boolean
 }) {
   const lineClass = scoreTone ? `line line-score-${scoreTone}` : 'line'
+  const orderedCards = sortLineCardsForDisplay(lineKey, cards.map(cardToString))
+  const handRank = handRankLabelForDisplay(lineKey, orderedCards)
+  const lineMeta =
+    handRank && showScore && royaltyText ? `${handRank} • ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
   return (
     <div className={lineClass}>
       <div className="line-header">
         <div className="line-label">{label}</div>
-        {showScore && royaltyText ? <div className="line-royalty">{royaltyText}</div> : null}
+        {lineMeta ? <div className="line-royalty">{lineMeta}</div> : null}
       </div>
       <div className="cards">
-        {cards.map((card) => (
-          <Card key={`${card.rank}${card.suit}`} value={`${card.rank}${card.suit}`} fourColor={fourColor} size={size} />
+        {orderedCards.map((card) => (
+          <Card key={card} value={card} fourColor={fourColor} size={size} />
         ))}
       </div>
     </div>
@@ -954,14 +1176,18 @@ function DropLine({
   showScore?: boolean
 }) {
   const lineClass = `line drop${scoreTone ? ` line-score-${scoreTone}` : ''}${tapTargetState ? ` line-tap-${tapTargetState}` : ''}`
+  const orderedCards = sortLineCardsForDisplay(lineKey, cards)
+  const handRank = handRankLabelForDisplay(lineKey, orderedCards)
+  const lineMeta =
+    handRank && showScore && royaltyText ? `${handRank} • ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
   return (
     <div className={lineClass} onDrop={onDrop} onDragOver={onDragOver} onClick={onLineTap}>
       <div className="line-header">
         <div className="line-label">{label}</div>
-        {showScore && royaltyText ? <div className="line-royalty">{royaltyText}</div> : null}
+        {lineMeta ? <div className="line-royalty">{lineMeta}</div> : null}
       </div>
       <div className="cards">
-        {cards.map((card) => (
+        {orderedCards.map((card) => (
           <Card
             key={card}
             value={card}
@@ -1122,6 +1348,43 @@ function royaltyNameForLine(line: keyof LinesState, cards: PlayingCard[]): strin
         return 'Straight'
       case 3:
         return 'Three of a kind'
+      default:
+        return null
+    }
+  } catch {
+    return null
+  }
+}
+
+function handRankNameForLine(line: keyof LinesState, cards: PlayingCard[]): string | null {
+  try {
+    if (line === 'top') {
+      if (cards.length !== 3) return null
+      const hand = evaluateThree(cards)
+      if (hand.category === 2) return 'Three of a Kind'
+      if (hand.category === 1) return 'One Pair'
+      return null
+    }
+
+    if (cards.length !== 5) return null
+    const hand = evaluateFive(cards)
+    switch (hand.category) {
+      case 8:
+        return 'Straight Flush'
+      case 7:
+        return 'Four of a Kind'
+      case 6:
+        return 'Full House'
+      case 5:
+        return 'Flush'
+      case 4:
+        return 'Straight'
+      case 3:
+        return 'Three of a Kind'
+      case 2:
+        return 'Two Pair'
+      case 1:
+        return 'One Pair'
       default:
         return null
     }

@@ -52,9 +52,19 @@ const CPU_BOT_NAME = 'CPU'
 const CPU_ACTION_DELAY_MS = 650
 const CPU_PROFILE_OPTIONS: Array<{ value: StrategyProfile; label: string }> = [
   { value: 'conservative_ev', label: 'Monte Carlo (conservative EV)' },
+  { value: 'balanced_ev', label: 'Monte Carlo (balanced EV)' },
+  { value: 'fantasy_pressure', label: 'Monte Carlo (fantasy pressure)' },
   { value: 'heuristic', label: 'Heuristic (rule + draw odds)' }
 ]
 const DEFAULT_PLAYER_NAMES = ['Bert', 'Ernie', 'Elmo', 'Oscar', 'Cookie Monster', 'Big Bird'] as const
+
+type CpuLocalSession = {
+  version: 1
+  localPlayerId: string
+  state: GameState
+  actionCounter: number
+  savedAt: number
+}
 
 function generatePlayerId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -111,6 +121,32 @@ function writeLocalPlayerName(name: string) {
   }
 }
 
+function readCpuLocalSession(): CpuLocalSession | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(CPU_LOCAL_SESSION_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<CpuLocalSession> | null
+    if (!parsed || parsed.version !== 1) return null
+    if (!parsed.localPlayerId || typeof parsed.localPlayerId !== 'string') return null
+    if (!parsed.state || typeof parsed.state !== 'object') return null
+    if (typeof parsed.actionCounter !== 'number') return null
+    if (typeof parsed.savedAt !== 'number') return null
+    return parsed as CpuLocalSession
+  } catch {
+    return null
+  }
+}
+
+function writeCpuLocalSession(session: CpuLocalSession) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(CPU_LOCAL_SESSION_KEY, JSON.stringify(session))
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
 function clearCpuLocalSession() {
   if (typeof window === 'undefined') return
   try {
@@ -120,11 +156,24 @@ function clearCpuLocalSession() {
   }
 }
 
+function isCpuLocalState(state: GameState, localPlayerId: string): boolean {
+  const local = state.players.find((player) => player.id === localPlayerId)
+  const cpu = state.players.find((player) => player.id === CPU_BOT_ID)
+  return Boolean(local && cpu && state.players.length === 2)
+}
+
 function readCpuProfile(): StrategyProfile {
   if (typeof window === 'undefined') return 'conservative_ev'
   try {
     const stored = window.localStorage.getItem(CPU_PROFILE_KEY)
-    if (stored === 'heuristic' || stored === 'conservative_ev') return stored
+    if (
+      stored === 'conservative_ev' ||
+      stored === 'balanced_ev' ||
+      stored === 'fantasy_pressure' ||
+      stored === 'heuristic'
+    ) {
+      return stored
+    }
     return 'conservative_ev'
   } catch {
     return 'conservative_ev'
@@ -138,6 +187,16 @@ function writeCpuProfile(profile: StrategyProfile) {
   } catch {
     // Ignore storage write failures.
   }
+}
+
+export function resolveCpuSessionForLocalPlayer(
+  session: CpuLocalSession | null,
+  localPlayerId: string
+): CpuLocalSession | null {
+  if (!session) return null
+  if (session.localPlayerId !== localPlayerId) return null
+  if (!isCpuLocalState(session.state, localPlayerId)) return null
+  return session
 }
 
 function getParamInsensitive(params: URLSearchParams, key: string): string | null {
@@ -673,6 +732,11 @@ export default function App() {
       clearRoomCache(previousRoom)
     }
 
+    const session = resolveCpuSessionForLocalPlayer(readCpuLocalSession(), localPlayerId)
+    if (!session) {
+      clearCpuLocalSession()
+    }
+
     const localPlayer: Player = {
       id: localPlayerId,
       name: playerName,
@@ -688,9 +752,8 @@ export default function App() {
       ready: false
     }
 
-    const localState = initialGameState([localPlayer, cpuPlayer])
-    actionCounter.value = seedActionCounterFromLog(localState.actionLog, localPlayerId, 0)
-    clearCpuLocalSession()
+    const localState = session ? session.state : initialGameState([localPlayer, cpuPlayer])
+    actionCounter.value = seedActionCounterFromLog(localState.actionLog, localPlayerId, session?.actionCounter ?? 0)
 
     roomSlugRef.current = null
     setRoomSlug(null)
@@ -1054,6 +1117,20 @@ export default function App() {
   useEffect(() => {
     writeCpuProfile(cpuProfile)
   }, [cpuProfile])
+
+  useEffect(() => {
+    if (gameMode !== 'cpu_local' || !state) return
+    if (!isCpuLocalState(state, localPlayerId)) return
+    const nextActionCounter = seedActionCounterFromLog(state.actionLog, localPlayerId, actionCounter.value)
+    actionCounter.value = nextActionCounter
+    writeCpuLocalSession({
+      version: 1,
+      localPlayerId,
+      state,
+      actionCounter: nextActionCounter,
+      savedAt: Date.now()
+    })
+  }, [actionCounter, gameMode, localPlayerId, state])
 
   useEffect(() => {
     if (!scoreboardOpen) return

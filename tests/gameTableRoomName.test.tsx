@@ -80,19 +80,6 @@ describe('GameTable room name display', () => {
     expect(html).toContain('Foul: Bottom')
   })
 
-  it('does not show leave game button', () => {
-    const html = renderToStaticMarkup(
-      <GameTable
-        state={initialGameState(players)}
-        localPlayerId="p1"
-        onPlace={() => undefined}
-        onSubmitInitial={() => undefined}
-        onResetRound={() => undefined}
-      />
-    )
-
-    expect(html).not.toContain('Leave Game')
-  })
 })
 
 function scoreState(linesByPlayer: {

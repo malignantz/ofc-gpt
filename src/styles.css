@@ -40,7 +40,7 @@ body {
   align-content: start;
   padding: var(--space-4);
   gap: var(--space-3);
-  max-width: 860px;
+  max-width: 760px;
   margin: 0 auto;
 }
 
@@ -319,6 +319,9 @@ body {
 .table-shell {
   display: grid;
   gap: 16px;
+  width: 100%;
+  max-width: 700px;
+  margin-inline: auto;
 }
 
 .table-header {
@@ -603,6 +606,8 @@ body {
 .line-stack {
   display: grid;
   gap: 8px;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .line {
