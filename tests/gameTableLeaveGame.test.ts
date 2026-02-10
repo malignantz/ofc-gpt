@@ -11,22 +11,7 @@ const players: Player[] = [
 ]
 
 describe('GameTable leave game control', () => {
-  it('renders Leave Game button when callback is provided', () => {
-    const html = renderToStaticMarkup(
-      createElement(GameTable, {
-        state: initialGameState(players),
-        localPlayerId: 'p1',
-        onPlace: () => undefined,
-        onSubmitInitial: () => undefined,
-        onResetRound: () => undefined,
-        onLeaveGame: () => undefined
-      })
-    )
-
-    expect(html).toContain('Leave Game')
-  })
-
-  it('does not render Leave Game button when callback is omitted', () => {
+  it('does not render Leave Game button', () => {
     const html = renderToStaticMarkup(
       createElement(GameTable, {
         state: initialGameState(players),

@@ -6,6 +6,13 @@ import { analyzeFoul, type FoulAnalysis } from '../../engine/validation'
 import { GameState, LinesState } from '../../state/gameState'
 import { royaltiesBreakdown, scoreHeadsUpDetailed, type HeadsUpDetailedResult } from '../../engine/scoring'
 import { RIVALRY_STORE_KEY } from '../utils/scoreboard'
+import {
+  buildDraftCardPoolSignature,
+  buildInitialDraftStorageKey,
+  clearInitialDraftSnapshot,
+  readInitialDraftSnapshot,
+  writeInitialDraftSnapshot
+} from '../utils/initialDraftStorage'
 import { Card } from './Card'
 
 type DraftLines = {
@@ -60,7 +67,6 @@ export type GameTableProps = {
   onPlace: (card: string, target: keyof LinesState) => void
   onSubmitInitial: (draft: LinesState) => void
   onResetRound: () => void
-  onLeaveGame?: () => void
   canStartNextRound?: boolean
   nextRoundLabel?: string
   nextRoundHint?: string | null
@@ -77,7 +83,6 @@ export function GameTable({
   onPlace,
   onSubmitInitial,
   onResetRound,
-  onLeaveGame,
   canStartNextRound = true,
   nextRoundLabel = 'Next Round',
   nextRoundHint = null,
@@ -98,10 +103,23 @@ export function GameTable({
   const autoPlayPlacementKeyRef = useRef('')
   const autoInitialSubmitKeyRef = useRef('')
   const initialHydrationSignatureRef = useRef('')
+  const initialDraftHydratedRef = useRef(false)
+  const draftStorageKey = useMemo(
+    () => buildInitialDraftStorageKey({ roomName, playerId: localPlayerId }),
+    [localPlayerId, roomName]
+  )
 
   useEffect(() => {
     if (state.phase !== 'initial') {
       initialHydrationSignatureRef.current = ''
+      initialDraftHydratedRef.current = false
+      if (typeof window !== 'undefined') {
+        try {
+          clearInitialDraftSnapshot(window.localStorage, draftStorageKey)
+        } catch {
+          // Ignore storage remove failures.
+        }
+      }
       setDraftPending([])
       setDraftLines({ top: [], middle: [], bottom: [] })
       return
@@ -120,9 +138,62 @@ export function GameTable({
     setSubmittedInitial(pending.length === 0 && placed === 5)
     if (initialHydrationSignatureRef.current === nextSignature) return
     initialHydrationSignatureRef.current = nextSignature
-    setDraftLines(nextDraftLines)
-    setDraftPending(nextDraftPending)
-  }, [localLines, pending, state.phase])
+    let hydratedLines = nextDraftLines
+    let hydratedPending = nextDraftPending
+    const shouldRestoreStoredDraft = placed === 0 && nextDraftPending.length > 0
+    if (shouldRestoreStoredDraft && typeof window !== 'undefined') {
+      try {
+        const sourceCardPoolSignature = buildDraftCardPoolSignature({
+          lines: nextDraftLines,
+          pending: nextDraftPending
+        })
+        const restored = readInitialDraftSnapshot(
+          window.localStorage,
+          draftStorageKey,
+          sourceCardPoolSignature
+        )
+        if (restored) {
+          hydratedLines = restored.lines
+          hydratedPending = restored.pending
+        }
+      } catch {
+        // Ignore storage read failures.
+      }
+    }
+    initialDraftHydratedRef.current = true
+    setDraftLines(hydratedLines)
+    setDraftPending(hydratedPending)
+  }, [draftStorageKey, localLines, pending, state.phase])
+
+  useEffect(() => {
+    if (!initialDraftHydratedRef.current) return
+    if (typeof window === 'undefined') return
+    try {
+      if (state.phase !== 'initial' || submittedInitial) {
+        clearInitialDraftSnapshot(window.localStorage, draftStorageKey)
+        return
+      }
+      const hasAnyDraftCards =
+        draftPending.length > 0 ||
+        draftLines.top.length > 0 ||
+        draftLines.middle.length > 0 ||
+        draftLines.bottom.length > 0
+      if (!hasAnyDraftCards) {
+        clearInitialDraftSnapshot(window.localStorage, draftStorageKey)
+        return
+      }
+      writeInitialDraftSnapshot(window.localStorage, draftStorageKey, {
+        lines: {
+          top: [...draftLines.top],
+          middle: [...draftLines.middle],
+          bottom: [...draftLines.bottom]
+        },
+        pending: [...draftPending]
+      })
+    } catch {
+      // Ignore storage write failures.
+    }
+  }, [draftLines, draftPending, draftStorageKey, state.phase, submittedInitial])
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
@@ -557,11 +628,6 @@ export function GameTable({
           </div>
         </div>
         <div className="table-actions">
-          {onLeaveGame ? (
-            <button className="button secondary btn-sm" onClick={onLeaveGame}>
-              Leave Game
-            </button>
-          ) : null}
           {state.phase === 'initial' && (
             <>
               <button className="button secondary btn-sm" onClick={resetInitial}>

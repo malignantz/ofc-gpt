@@ -80,7 +80,7 @@ describe('GameTable room name display', () => {
     expect(html).toContain('Foul: Bottom')
   })
 
-  it('shows leave game button when leave callback is provided', () => {
+  it('does not show leave game button', () => {
     const html = renderToStaticMarkup(
       <GameTable
         state={initialGameState(players)}
@@ -88,11 +88,10 @@ describe('GameTable room name display', () => {
         onPlace={() => undefined}
         onSubmitInitial={() => undefined}
         onResetRound={() => undefined}
-        onLeaveGame={() => undefined}
       />
     )
 
-    expect(html).toContain('Leave Game')
+    expect(html).not.toContain('Leave Game')
   })
 })
 

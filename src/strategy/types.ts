@@ -1,7 +1,7 @@
 import type { Card } from '../engine/cards'
 import type { GameAction, GameState, LinesState } from '../state/gameState'
 
-export type StrategyProfile = 'conservative_ev'
+export type StrategyProfile = 'conservative_ev' | 'heuristic'
 
 export type PlacementTarget = keyof LinesState
 

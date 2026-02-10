@@ -21,6 +21,7 @@ import {
   RoomSnapshot
 } from '../sync/roomStore'
 import { planCpuActions } from '../strategy/cpuPlanner'
+import type { StrategyProfile } from '../strategy/types'
 
 export type View = 'lobby' | 'table'
 type GameMode = 'online' | 'cpu_local'
@@ -45,18 +46,15 @@ const PEER_PING_TIMEOUT_MS = HEARTBEAT_MS * 3
 const PEER_ACK_TIMEOUT_MS = HEARTBEAT_MS * 4
 const BOOTSTRAP_WARNING_GRACE_MS = 8_000
 const CPU_LOCAL_SESSION_KEY = 'ofc:cpu-local-session-v1'
+const CPU_PROFILE_KEY = 'ofc:cpu-profile-v1'
 const CPU_BOT_ID = '__cpu_bot__'
 const CPU_BOT_NAME = 'CPU'
 const CPU_ACTION_DELAY_MS = 650
+const CPU_PROFILE_OPTIONS: Array<{ value: StrategyProfile; label: string }> = [
+  { value: 'conservative_ev', label: 'Monte Carlo (conservative EV)' },
+  { value: 'heuristic', label: 'Heuristic (rule + draw odds)' }
+]
 const DEFAULT_PLAYER_NAMES = ['Bert', 'Ernie', 'Elmo', 'Oscar', 'Cookie Monster', 'Big Bird'] as const
-
-type CpuLocalSession = {
-  version: 1
-  localPlayerId: string
-  state: GameState
-  actionCounter: number
-  savedAt: number
-}
 
 function generatePlayerId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -113,32 +111,6 @@ function writeLocalPlayerName(name: string) {
   }
 }
 
-function readCpuLocalSession(): CpuLocalSession | null {
-  if (typeof window === 'undefined') return null
-  try {
-    const raw = window.localStorage.getItem(CPU_LOCAL_SESSION_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<CpuLocalSession> | null
-    if (!parsed || parsed.version !== 1) return null
-    if (!parsed.localPlayerId || typeof parsed.localPlayerId !== 'string') return null
-    if (!parsed.state || typeof parsed.state !== 'object') return null
-    if (typeof parsed.actionCounter !== 'number') return null
-    if (typeof parsed.savedAt !== 'number') return null
-    return parsed as CpuLocalSession
-  } catch {
-    return null
-  }
-}
-
-function writeCpuLocalSession(session: CpuLocalSession) {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(CPU_LOCAL_SESSION_KEY, JSON.stringify(session))
-  } catch {
-    // Ignore storage write failures.
-  }
-}
-
 function clearCpuLocalSession() {
   if (typeof window === 'undefined') return
   try {
@@ -148,10 +120,24 @@ function clearCpuLocalSession() {
   }
 }
 
-function isCpuLocalState(state: GameState, localPlayerId: string): boolean {
-  const local = state.players.find((player) => player.id === localPlayerId)
-  const cpu = state.players.find((player) => player.id === CPU_BOT_ID)
-  return Boolean(local && cpu && state.players.length === 2)
+function readCpuProfile(): StrategyProfile {
+  if (typeof window === 'undefined') return 'conservative_ev'
+  try {
+    const stored = window.localStorage.getItem(CPU_PROFILE_KEY)
+    if (stored === 'heuristic' || stored === 'conservative_ev') return stored
+    return 'conservative_ev'
+  } catch {
+    return 'conservative_ev'
+  }
+}
+
+function writeCpuProfile(profile: StrategyProfile) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(CPU_PROFILE_KEY, profile)
+  } catch {
+    // Ignore storage write failures.
+  }
 }
 
 function getParamInsensitive(params: URLSearchParams, key: string): string | null {
@@ -279,6 +265,7 @@ export default function App() {
   const [scoreboardEntries, setScoreboardEntries] = useState<ScoreboardEntry[]>([])
   const [fourColorDeck, setFourColorDeck] = useState(true)
   const [hideSubmitButton, setHideSubmitButton] = useState(false)
+  const [cpuProfile, setCpuProfile] = useState<StrategyProfile>(() => readCpuProfile())
   const [localPlayerId] = useState(() => getOrCreateLocalPlayerId())
   const [state, setState] = useState<GameState | null>(null)
   const [roomSlug, setRoomSlug] = useState<string | null>(null)
@@ -1065,65 +1052,8 @@ export default function App() {
   }, [playerName])
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    if (state || view !== 'lobby') return
-
-    const params = new URLSearchParams(window.location.search)
-    const pathRoom = window.location.pathname.replace(/^\//, '')
-    const roomFromUrl = getParamInsensitive(params, 'room') ?? (pathRoom.length > 0 ? decodeURIComponent(pathRoom) : null)
-    if (roomFromUrl) return
-
-    const session = readCpuLocalSession()
-    if (!session) return
-    if (session.localPlayerId !== localPlayerId || !isCpuLocalState(session.state, localPlayerId)) {
-      clearCpuLocalSession()
-      return
-    }
-
-    actionCounter.value = seedActionCounterFromLog(session.state.actionLog, localPlayerId, session.actionCounter)
-    roomSlugRef.current = null
-    setRoomSlug(null)
-    setGameMode('cpu_local')
-    setView('table')
-    setRoomRole('host')
-    setPlayerCount(2)
-    setConnectedPeers([CPU_BOT_ID])
-    setParticipantPresenceById({})
-    setConnectivityByPlayerId({ [localPlayerId]: true, [CPU_BOT_ID]: true })
-    setWaitingMessage(null)
-    setSyncError(null)
-    setJoining(false)
-    setState(session.state)
-    lastHydrationSignatureRef.current = ''
-    lastPersistedStateSignatureRef.current = ''
-    latestPingTokenRef.current = ''
-    latestPingAtRef.current = 0
-    latestAckAtRef.current = 0
-    acknowledgedPeerPingRef.current = ''
-    bootstrapInProgressRef.current = false
-    bootstrapRoomRef.current = null
-    bootstrapStartedAtRef.current = 0
-    activeGameIdRef.current = null
-    activeActionsVersionRef.current = 0
-    roomReadyRef.current = false
-    outboundActionQueueRef.current = []
-    outboundFlushInFlightRef.current = false
-    localJoinedAtRef.current = undefined
-  }, [actionCounter, localPlayerId, state, view])
-
-  useEffect(() => {
-    if (gameMode !== 'cpu_local' || !state) return
-    if (!isCpuLocalState(state, localPlayerId)) return
-    const nextActionCounter = seedActionCounterFromLog(state.actionLog, localPlayerId, actionCounter.value)
-    actionCounter.value = nextActionCounter
-    writeCpuLocalSession({
-      version: 1,
-      localPlayerId,
-      state,
-      actionCounter: nextActionCounter,
-      savedAt: Date.now()
-    })
-  }, [actionCounter, gameMode, localPlayerId, state])
+    writeCpuProfile(cpuProfile)
+  }, [cpuProfile])
 
   useEffect(() => {
     if (!scoreboardOpen) return
@@ -1461,7 +1391,8 @@ export default function App() {
       state,
       cpuPlayerId: CPU_BOT_ID,
       knownDeck,
-      delayMs: CPU_ACTION_DELAY_MS
+      delayMs: CPU_ACTION_DELAY_MS,
+      profile: cpuProfile
     })
     if (!plan) {
       cpuPlannerKeyRef.current = ''
@@ -1478,7 +1409,7 @@ export default function App() {
       cpuPlannerTimeoutRef.current = null
       dispatchBatchAndSync(plan.actions)
     }, plan.delayMs)
-  }, [dispatchBatchAndSync, gameMode, knownDeck, state])
+  }, [cpuProfile, dispatchBatchAndSync, gameMode, knownDeck, state])
 
   useEffect(() => {
     if (!state || state.phase !== 'play') return
@@ -1744,6 +1675,19 @@ export default function App() {
               <span>Player Name</span>
               <input value={playerName} onChange={(event) => setPlayerName(event.target.value)} />
             </label>
+            <label className="setting-field">
+              <span>CPU Profile</span>
+              <select
+                value={cpuProfile}
+                onChange={(event) => setCpuProfile(event.target.value as StrategyProfile)}
+              >
+                {CPU_PROFILE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label className="setting-row">
               <input type="checkbox" checked={fourColorDeck} onChange={(event) => setFourColorDeck(event.target.checked)} />
               4-Color Deck
@@ -1846,7 +1790,6 @@ export default function App() {
             dispatchBatchAndSync(actions)
           }}
           onResetRound={resetRoundAndSync}
-          onLeaveGame={gameMode === 'cpu_local' ? returnToLobby : undefined}
           canStartNextRound={canStartNextRound}
           nextRoundLabel={nextRoundLabel}
           nextRoundHint={nextRoundHint}

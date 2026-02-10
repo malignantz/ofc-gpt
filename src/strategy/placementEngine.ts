@@ -3,6 +3,7 @@ import { compareRanks, evaluateFive, evaluateThree } from '../engine/handEval'
 import { royaltiesBottom, royaltiesMiddle, royaltiesTop, scoreHeadsUpDetailed } from '../engine/scoring'
 import type { LinesState } from '../state/gameState'
 import { hashString32, shuffleDeterministic } from './deterministicRng'
+import { heuristicInitialPlacement, heuristicPlayPlacement } from './heuristicEngine'
 import type {
   InitialPlacementDecision,
   InitialPlacementInput,
@@ -269,6 +270,10 @@ function fallbackTarget(lines: LinesState): PlacementTarget {
 }
 
 export function choosePlayPlacement(input: PlayPlacementInput): PlacementDecision {
+  if (input.profile === 'heuristic') {
+    return heuristicPlayPlacement(input)
+  }
+
   const botCard = input.botPending[0]
   const byTarget: Record<PlacementTarget, number | null> = { top: null, middle: null, bottom: null }
   if (!botCard) {
@@ -335,6 +340,10 @@ function buildFallbackInitial(lines: LinesState, pending: Card[]): InitialPlacem
 }
 
 export function chooseInitialPlacement(input: InitialPlacementInput): InitialPlacementDecision {
+  if (input.profile === 'heuristic') {
+    return heuristicInitialPlacement(input)
+  }
+
   if (input.botPending.length === 0) {
     return {
       top: [...input.botLines.top],
