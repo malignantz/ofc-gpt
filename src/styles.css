@@ -608,13 +608,24 @@ body {
   gap: 8px;
   width: fit-content;
   max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 
 .line {
+  --line-slot-count: 5;
+  --line-card-width: 44px;
+  --line-card-gap: 5px;
+  --line-buffer: 32px;
   border: 1px dashed #d8cabb;
   border-radius: 10px;
   padding: 6px 8px;
   min-height: 72px;
+  width: calc(
+    var(--line-slot-count) * var(--line-card-width) +
+    (var(--line-slot-count) - 1) * var(--line-card-gap) +
+    var(--line-buffer)
+  );
 }
 
 .line-header {
@@ -659,6 +670,21 @@ body {
 .line .cards {
   min-height: 64px;
   align-items: center;
+  flex-wrap: nowrap;
+}
+
+.line-cap-3 {
+  --line-slot-count: 3;
+}
+
+.line-cap-5 {
+  --line-slot-count: 5;
+}
+
+.line-size-small {
+  --line-card-width: 36px;
+  --line-card-gap: 4px;
+  --line-buffer: 24px;
 }
 
 .line.drop {

@@ -1124,7 +1124,9 @@ function Line({
   royaltyText?: string | null
   showScore?: boolean
 }) {
-  const lineClass = scoreTone ? `line line-score-${scoreTone}` : 'line'
+  const slotCount = lineKey === 'top' ? 3 : 5
+  const sizeClass = size === 'small' ? 'line-size-small' : 'line-size-normal'
+  const lineClass = `${scoreTone ? `line line-score-${scoreTone}` : 'line'} line-cap-${slotCount} ${sizeClass}`
   const orderedCards = sortLineCardsForDisplay(lineKey, cards.map(cardToString))
   const handRank = handRankLabelForDisplay(lineKey, orderedCards)
   const lineMeta =
@@ -1175,7 +1177,8 @@ function DropLine({
   royaltyText?: string | null
   showScore?: boolean
 }) {
-  const lineClass = `line drop${scoreTone ? ` line-score-${scoreTone}` : ''}${tapTargetState ? ` line-tap-${tapTargetState}` : ''}`
+  const slotCount = lineKey === 'top' ? 3 : 5
+  const lineClass = `line drop line-cap-${slotCount} line-size-normal${scoreTone ? ` line-score-${scoreTone}` : ''}${tapTargetState ? ` line-tap-${tapTargetState}` : ''}`
   const orderedCards = sortLineCardsForDisplay(lineKey, cards)
   const handRank = handRankLabelForDisplay(lineKey, orderedCards)
   const lineMeta =
