@@ -21,6 +21,7 @@ import {
   RoomSnapshot
 } from '../sync/roomStore'
 import { planCpuActions } from '../strategy/cpuPlanner'
+import type { StrategyProfile } from '../strategy/types'
 
 export type View = 'lobby' | 'table'
 type GameMode = 'online' | 'cpu_local'
@@ -45,9 +46,16 @@ const PEER_PING_TIMEOUT_MS = HEARTBEAT_MS * 3
 const PEER_ACK_TIMEOUT_MS = HEARTBEAT_MS * 4
 const BOOTSTRAP_WARNING_GRACE_MS = 8_000
 const CPU_LOCAL_SESSION_KEY = 'ofc:cpu-local-session-v1'
+const CPU_PROFILE_KEY = 'ofc:cpu-profile-v1'
 const CPU_BOT_ID = '__cpu_bot__'
 const CPU_BOT_NAME = 'CPU'
 const CPU_ACTION_DELAY_MS = 650
+const CPU_PROFILE_OPTIONS: Array<{ value: StrategyProfile; label: string }> = [
+  { value: 'conservative_ev', label: 'Monte Carlo (conservative EV)' },
+  { value: 'balanced_ev', label: 'Monte Carlo (balanced EV)' },
+  { value: 'fantasy_pressure', label: 'Monte Carlo (fantasy pressure)' },
+  { value: 'heuristic', label: 'Heuristic (rule + draw odds)' }
+]
 const DEFAULT_PLAYER_NAMES = ['Bert', 'Ernie', 'Elmo', 'Oscar', 'Cookie Monster', 'Big Bird'] as const
 
 type CpuLocalSession = {
@@ -152,6 +160,33 @@ function isCpuLocalState(state: GameState, localPlayerId: string): boolean {
   const local = state.players.find((player) => player.id === localPlayerId)
   const cpu = state.players.find((player) => player.id === CPU_BOT_ID)
   return Boolean(local && cpu && state.players.length === 2)
+}
+
+function readCpuProfile(): StrategyProfile {
+  if (typeof window === 'undefined') return 'conservative_ev'
+  try {
+    const stored = window.localStorage.getItem(CPU_PROFILE_KEY)
+    if (
+      stored === 'conservative_ev' ||
+      stored === 'balanced_ev' ||
+      stored === 'fantasy_pressure' ||
+      stored === 'heuristic'
+    ) {
+      return stored
+    }
+    return 'conservative_ev'
+  } catch {
+    return 'conservative_ev'
+  }
+}
+
+function writeCpuProfile(profile: StrategyProfile) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(CPU_PROFILE_KEY, profile)
+  } catch {
+    // Ignore storage write failures.
+  }
 }
 
 export function resolveCpuSessionForLocalPlayer(
@@ -289,6 +324,7 @@ export default function App() {
   const [scoreboardEntries, setScoreboardEntries] = useState<ScoreboardEntry[]>([])
   const [fourColorDeck, setFourColorDeck] = useState(true)
   const [hideSubmitButton, setHideSubmitButton] = useState(false)
+  const [cpuProfile, setCpuProfile] = useState<StrategyProfile>(() => readCpuProfile())
   const [localPlayerId] = useState(() => getOrCreateLocalPlayerId())
   const [state, setState] = useState<GameState | null>(null)
   const [roomSlug, setRoomSlug] = useState<string | null>(null)
@@ -1079,6 +1115,10 @@ export default function App() {
   }, [playerName])
 
   useEffect(() => {
+    writeCpuProfile(cpuProfile)
+  }, [cpuProfile])
+
+  useEffect(() => {
     if (gameMode !== 'cpu_local' || !state) return
     if (!isCpuLocalState(state, localPlayerId)) return
     const nextActionCounter = seedActionCounterFromLog(state.actionLog, localPlayerId, actionCounter.value)
@@ -1428,7 +1468,8 @@ export default function App() {
       state,
       cpuPlayerId: CPU_BOT_ID,
       knownDeck,
-      delayMs: CPU_ACTION_DELAY_MS
+      delayMs: CPU_ACTION_DELAY_MS,
+      profile: cpuProfile
     })
     if (!plan) {
       cpuPlannerKeyRef.current = ''
@@ -1445,7 +1486,7 @@ export default function App() {
       cpuPlannerTimeoutRef.current = null
       dispatchBatchAndSync(plan.actions)
     }, plan.delayMs)
-  }, [dispatchBatchAndSync, gameMode, knownDeck, state])
+  }, [cpuProfile, dispatchBatchAndSync, gameMode, knownDeck, state])
 
   useEffect(() => {
     if (!state || state.phase !== 'play') return
@@ -1710,6 +1751,19 @@ export default function App() {
             <label className="setting-field">
               <span>Player Name</span>
               <input value={playerName} onChange={(event) => setPlayerName(event.target.value)} />
+            </label>
+            <label className="setting-field">
+              <span>CPU Profile</span>
+              <select
+                value={cpuProfile}
+                onChange={(event) => setCpuProfile(event.target.value as StrategyProfile)}
+              >
+                {CPU_PROFILE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
             </label>
             <label className="setting-row">
               <input type="checkbox" checked={fourColorDeck} onChange={(event) => setFourColorDeck(event.target.checked)} />

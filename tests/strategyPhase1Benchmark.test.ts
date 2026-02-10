@@ -9,7 +9,8 @@ import type { StrategyProfile } from '../src/strategy/types'
 
 const LINE_LIMITS = { top: 3, middle: 5, bottom: 5 } as const
 const TARGET_PRIORITY: Array<keyof LinesState> = ['bottom', 'middle', 'top']
-const PROFILES: StrategyProfile[] = ['conservative_ev', 'balanced_ev', 'fantasy_pressure']
+type BenchmarkProfile = Exclude<StrategyProfile, 'heuristic'>
+const PROFILES: BenchmarkProfile[] = ['conservative_ev', 'balanced_ev', 'fantasy_pressure']
 
 type BenchmarkMetrics = {
   samples: number
@@ -19,8 +20,8 @@ type BenchmarkMetrics = {
 }
 
 type BenchmarkResult = {
-  play: Record<StrategyProfile, BenchmarkMetrics>
-  initial: Record<StrategyProfile, BenchmarkMetrics>
+  play: Record<BenchmarkProfile, BenchmarkMetrics>
+  initial: Record<BenchmarkProfile, BenchmarkMetrics>
 }
 
 type PlayScenario = {
@@ -162,7 +163,7 @@ function makeInitialScenario(index: number): InitialScenario {
   }
 }
 
-function createMetrics(): Record<StrategyProfile, BenchmarkMetrics> {
+function createMetrics(): Record<BenchmarkProfile, BenchmarkMetrics> {
   return {
     conservative_ev: { samples: 0, avgScore: 0, foulRate: 0, avgLatencyMs: 0 },
     balanced_ev: { samples: 0, avgScore: 0, foulRate: 0, avgLatencyMs: 0 },
@@ -170,7 +171,9 @@ function createMetrics(): Record<StrategyProfile, BenchmarkMetrics> {
   }
 }
 
-function finalizeMetrics(raw: Record<StrategyProfile, { samples: number; score: number; fouls: number; latencyMs: number }>) {
+function finalizeMetrics(
+  raw: Record<BenchmarkProfile, { samples: number; score: number; fouls: number; latencyMs: number }>
+) {
   const result = createMetrics()
   for (const profile of PROFILES) {
     const profileRaw = raw[profile]
@@ -186,12 +189,12 @@ function finalizeMetrics(raw: Record<StrategyProfile, { samples: number; score: 
 }
 
 function runBenchmarkSuite(): BenchmarkResult {
-  const playRaw: Record<StrategyProfile, { samples: number; score: number; fouls: number; latencyMs: number }> = {
+  const playRaw: Record<BenchmarkProfile, { samples: number; score: number; fouls: number; latencyMs: number }> = {
     conservative_ev: { samples: 0, score: 0, fouls: 0, latencyMs: 0 },
     balanced_ev: { samples: 0, score: 0, fouls: 0, latencyMs: 0 },
     fantasy_pressure: { samples: 0, score: 0, fouls: 0, latencyMs: 0 }
   }
-  const initialRaw: Record<StrategyProfile, { samples: number; score: number; fouls: number; latencyMs: number }> = {
+  const initialRaw: Record<BenchmarkProfile, { samples: number; score: number; fouls: number; latencyMs: number }> = {
     conservative_ev: { samples: 0, score: 0, fouls: 0, latencyMs: 0 },
     balanced_ev: { samples: 0, score: 0, fouls: 0, latencyMs: 0 },
     fantasy_pressure: { samples: 0, score: 0, fouls: 0, latencyMs: 0 }
