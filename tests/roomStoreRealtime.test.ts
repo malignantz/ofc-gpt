@@ -29,6 +29,16 @@ class RealtimeMemoryClient implements FirebaseRestClient {
       return (options?.body ?? null) as T
     }
     if (method === 'PATCH') {
+      if (isRecord(options?.body)) {
+        const patchEntries = Object.entries(options.body as Record<string, unknown>)
+        if (patchEntries.some(([key]) => key.includes('/'))) {
+          patchEntries.forEach(([key, value]) => {
+            this.write(`${normalizedPath}/${key}`, value)
+          })
+          this.emitDiff(before)
+          return this.read(normalizedPath) as T
+        }
+      }
       const current = this.read(normalizedPath)
       const merged =
         isRecord(current) && isRecord(options?.body)
@@ -175,10 +185,10 @@ function createTrackingTimers() {
         callbacks.set(id, callback as () => void)
         intervalCount += 1
         return id as unknown as ReturnType<typeof setInterval>
-      }) as typeof globalThis.setInterval,
+      }) as unknown as typeof globalThis.setInterval,
       clearInterval: ((id: number) => {
         callbacks.delete(id)
-      }) as typeof globalThis.clearInterval
+      }) as unknown as typeof globalThis.clearInterval
     },
     tick: async () => {
       for (const callback of callbacks.values()) {

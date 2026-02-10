@@ -29,6 +29,15 @@ class FakeFirebaseClient implements FirebaseRestClient {
       return options?.body as T
     }
     if (method === 'PATCH') {
+      if (typeof options?.body === 'object' && options.body !== null) {
+        const patchEntries = Object.entries(options.body as Record<string, unknown>)
+        if (patchEntries.some(([key]) => key.includes('/'))) {
+          patchEntries.forEach(([key, value]) => {
+            this.writePath([...segments, ...key.split('/').filter(Boolean)], value)
+          })
+          return this.readPath(segments) as T
+        }
+      }
       const current = this.readPath(segments)
       const merged =
         typeof current === 'object' && current !== null && typeof options?.body === 'object' && options.body !== null
@@ -90,6 +99,19 @@ class FakeFirebaseClient implements FirebaseRestClient {
     const leaf = segments[segments.length - 1]
     if (!leaf) return
     delete current[leaf]
+  }
+}
+
+class SlowPatchFirebaseClient extends FakeFirebaseClient {
+  constructor(private readonly roomPath: string, private readonly patchDelayMs: number) {
+    super()
+  }
+
+  override async requestJson<T>(path: string, options?: FirebaseRequestOptions): Promise<T> {
+    if (options?.method === 'PATCH' && path === this.roomPath) {
+      await new Promise((resolve) => setTimeout(resolve, this.patchDelayMs))
+    }
+    return super.requestJson(path, options)
   }
 }
 
@@ -260,6 +282,46 @@ describe('roomStore action writes', () => {
     expect(second).toBeNull()
     expect(snapshot.actions).toHaveLength(1)
     expect(snapshot.actions[0]?.id).toBe('p1-1')
+  })
+
+  it('serializes concurrent appendAction calls per room to keep actionsVersion monotonic', async () => {
+    let now = 100
+    const client = new SlowPatchFirebaseClient('/rooms/append-serialize', 5)
+    const store = createRoomStore({
+      client,
+      now: () => {
+        now += 1
+        return now
+      }
+    })
+
+    await store.createRoom({
+      roomId: 'append-serialize',
+      displayName: 'append-serialize',
+      hostId: 'p1',
+      hostName: 'Host',
+      expectedPlayers: 2
+    })
+
+    const [first, second] = await Promise.all([
+      store.appendAction({
+        roomId: 'append-serialize',
+        actorId: 'p1',
+        action: { id: 'p1-1', type: 'ready', playerId: 'p1' }
+      }),
+      store.appendAction({
+        roomId: 'append-serialize',
+        actorId: 'p2',
+        action: { id: 'p2-1', type: 'ready', playerId: 'p2' }
+      })
+    ])
+
+    expect(first?.id).toBe('p1-1')
+    expect(second?.id).toBe('p2-1')
+
+    const snapshot = await store.fetchRoomSnapshot('append-serialize')
+    expect(snapshot.actions.map((action) => action.id)).toEqual(['p1-1', 'p2-1'])
+    expect(snapshot.meta?.actionsVersion).toBe(2)
   })
 
   it('uses current gameId to isolate future sessions from past actions', async () => {

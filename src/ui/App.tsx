@@ -9,8 +9,9 @@ import { toRoomSlug } from './utils/roomNames'
 import { ROUND_TAKEOVER_TIMEOUT_MS, getRoundRestartDecision } from './utils/roundControl'
 import { ScoreboardEntry, readScoreboardEntriesFromLocalStorage } from './utils/scoreboard'
 import { resolveIncomingState, shouldIgnoreRegressiveSnapshot } from './utils/snapshotConsistency'
-import { hydrateRoomState, seedActionCounterFromLog } from '../sync/roomHydration'
+import { hydrateRoomState, seedActionCounterFromLog, sortActionRecords } from '../sync/roomHydration'
 import { WAITING_OPPONENT_ID } from '../sync/constants'
+import { clearRoomCache, loadRoomCache, saveRoomCache } from '../sync/localStateCache'
 import {
   createRoomStore,
   ParticipantPresence,
@@ -35,7 +36,7 @@ type PresenceUpdateInput = {
 
 const LOCAL_PLAYER_ID_KEY = 'ofc:local-player-id'
 const LOCAL_PLAYER_NAME_KEY = 'ofc:player-name'
-const HEARTBEAT_MS = 10_000
+const HEARTBEAT_MS = 15_000
 const MIN_PRESENCE_WRITE_MS = 1_000
 const PEER_PING_TIMEOUT_MS = HEARTBEAT_MS * 3
 const PEER_ACK_TIMEOUT_MS = HEARTBEAT_MS * 4
@@ -118,6 +119,28 @@ function buildSharePath(roomSlug: string, role: RoomRole): string {
 
 function buildPingToken(playerId: string): string {
   return `${playerId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+}
+
+function toPlacementCardKey(card: { rank: string; suit: string }): string {
+  return `${card.rank}${card.suit}`
+}
+
+function buildInitialPlacementActionId(input: {
+  gameId: string
+  playerId: string
+  card: { rank: string; suit: string }
+  target: keyof GameState['lines'][string]
+}): string {
+  return `initial-place:${input.gameId}:${input.playerId}:${toPlacementCardKey(input.card)}:${input.target}`
+}
+
+function buildPlayPlacementActionId(input: {
+  gameId: string
+  playerId: string
+  card: { rank: string; suit: string }
+  target: keyof GameState['lines'][string]
+}): string {
+  return `play-place:${input.gameId}:${input.playerId}:${toPlacementCardKey(input.card)}:${input.target}`
 }
 
 function formatSigned(value: number): string {
@@ -222,6 +245,7 @@ export default function App() {
   const autoJoinRef = useRef(false)
   const nameBroadcastTimerRef = useRef<number | null>(null)
   const autoDrawRef = useRef('')
+  const autoInitialPlacementRef = useRef('')
   const deferredActionsRef = useRef<{ action: GameAction; attempts: number }[]>([])
   const lastHydrationSignatureRef = useRef('')
   const lastPersistedStateSignatureRef = useRef('')
@@ -233,6 +257,7 @@ export default function App() {
   const bootstrapRoomRef = useRef<string | null>(null)
   const bootstrapStartedAtRef = useRef(0)
   const activeGameIdRef = useRef<string | null>(null)
+  const activeActionsVersionRef = useRef(0)
   const roomReadyRef = useRef(false)
   const outboundActionQueueRef = useRef<QueuedOutboundAction[]>([])
   const outboundFlushInFlightRef = useRef(false)
@@ -389,6 +414,7 @@ export default function App() {
       const incomingGameId = snapshot.meta?.currentGameId ?? null
       roomReadyRef.current = Boolean(snapshot.meta)
       activeGameIdRef.current = incomingGameId
+      activeActionsVersionRef.current = snapshot.meta?.actionsVersion ?? 0
       const now = Date.now()
       const participantMap: Record<string, ParticipantPresence> = {}
       snapshot.participants.forEach((participant) => {
@@ -464,7 +490,10 @@ export default function App() {
       const signature = `${snapshot.roomId}|${snapshot.meta?.currentGameId ?? 'none'}|${
         snapshot.gameState?.actionLog.length ?? -1
       }|${hydrated.connectedPeerIds.join(',')}|${hydrated.actionLog.map((action) => action.id).join(',')}`
-      if (signature === lastHydrationSignatureRef.current) return
+      if (signature === lastHydrationSignatureRef.current) {
+        flushOutboundQueue(snapshot.roomId)
+        return
+      }
       lastHydrationSignatureRef.current = signature
 
       if (resolvedState) {
@@ -494,14 +523,19 @@ export default function App() {
       const bootstrapMatchesRoom =
         bootstrapInProgressRef.current && bootstrapRoomRef.current === snapshot.roomId
       const suppressDroppedWarnings = bootstrapMatchesRoom && bootstrapElapsedMs <= BOOTSTRAP_WARNING_GRACE_MS
+      const authoritativeSnapshot = snapshot.gameStateIncluded
       if (bootstrapMatchesRoom && (hydrated.droppedActionIds.length === 0 || bootstrapElapsedMs > BOOTSTRAP_WARNING_GRACE_MS)) {
         bootstrapInProgressRef.current = false
         bootstrapRoomRef.current = null
       }
 
       if (hydrated.droppedActionIds.length > 0) {
-        if (!suppressDroppedWarnings) {
+        if (!suppressDroppedWarnings && authoritativeSnapshot) {
           setSyncError(`Dropped invalid actions: ${hydrated.droppedActionIds.join(', ')}`)
+        } else {
+          setSyncError((current) =>
+            current && current.startsWith('Dropped invalid actions:') ? null : current
+          )
         }
       } else {
         setSyncError((current) =>
@@ -516,6 +550,7 @@ export default function App() {
     const activeRoom = roomSlugRef.current
     if (activeRoom) {
       void roomStore.leaveRoom(activeRoom, localPlayerId).catch(() => undefined)
+      clearRoomCache(activeRoom)
     }
     roomSlugRef.current = null
     setRoomSlug(null)
@@ -537,6 +572,7 @@ export default function App() {
     bootstrapRoomRef.current = null
     bootstrapStartedAtRef.current = 0
     activeGameIdRef.current = null
+    activeActionsVersionRef.current = 0
     roomReadyRef.current = false
     outboundActionQueueRef.current = []
     outboundFlushInFlightRef.current = false
@@ -586,6 +622,7 @@ export default function App() {
       const previousRoom = roomSlugRef.current
       if (previousRoom && previousRoom !== slug) {
         await roomStore.leaveRoom(previousRoom, localPlayerId).catch(() => undefined)
+        clearRoomCache(previousRoom)
       }
 
       setView('table')
@@ -617,6 +654,7 @@ export default function App() {
       setJoining(true)
       lastHydrationSignatureRef.current = ''
       activeGameIdRef.current = null
+      activeActionsVersionRef.current = 0
       roomReadyRef.current = false
       outboundActionQueueRef.current = []
       outboundFlushInFlightRef.current = false
@@ -627,6 +665,133 @@ export default function App() {
       try {
         let snapshot: RoomSnapshot
         let effectiveRole: RoomRole = host ? 'host' : 'guest'
+        const cached = loadRoomCache(slug)
+
+        if (cached) {
+          const meta = await roomStore.fetchRoomMeta(slug)
+          const cacheMatchesSession =
+            meta !== null && meta.currentGameId === cached.gameId && meta.actionsVersion >= cached.actionsVersion
+          if (meta && cacheMatchesSession) {
+            let replayFailed = false
+            let replayedState = cached.state
+            const replayedActions = [...cached.actions]
+            if (meta.actionsVersion > cached.actionsVersion) {
+              const remoteActions = sortActionRecords(await roomStore.fetchRoomActions(slug, { gameId: meta.currentGameId }))
+              const cachedActionIds = new Set(cached.actions.map((action) => action.id))
+              const missingActions = remoteActions.filter((record) => !cachedActionIds.has(record.id))
+              for (const record of missingActions) {
+                try {
+                  replayedState = applyAction(replayedState, record.action)
+                  replayedActions.push(record.action)
+                } catch {
+                  replayFailed = true
+                  break
+                }
+              }
+            }
+
+            if (!replayFailed) {
+              const joinedSnapshot = await roomStore.joinRoom({
+                roomId: slug,
+                playerId: localPlayerId,
+                playerName,
+                role: cached.role,
+                includeSnapshot: false
+              })
+              const localParticipant = joinedSnapshot.participants.find(
+                (participant) => participant.playerId === localPlayerId
+              )
+              if (localParticipant) {
+                effectiveRole = localParticipant.role
+              } else {
+                effectiveRole = cached.role
+              }
+              const joinedAt = localParticipant?.joinedAt ?? cached.joinedAt
+              setRoomRole(effectiveRole)
+              const now = Date.now()
+              const participantMap: Record<string, ParticipantPresence> = {}
+              joinedSnapshot.participants.forEach((participant) => {
+                if (participant.playerId === WAITING_OPPONENT_ID) return
+                participantMap[participant.playerId] = participant
+              })
+              setParticipantPresenceById(participantMap)
+              localJoinedAtRef.current = joinedAt
+
+              const peerPresence = Object.values(participantMap).find(
+                (participant) => participant.playerId !== localPlayerId
+              )
+              const peerRecentlySeen = Boolean(peerPresence && now - peerPresence.lastSeenAt <= PEER_PING_TIMEOUT_MS)
+              const peerAckedLatestPing = Boolean(
+                peerPresence &&
+                  latestPingTokenRef.current &&
+                  peerPresence.ackForPeerPingToken === latestPingTokenRef.current &&
+                  (peerPresence.ackAt ?? 0) > 0 &&
+                  now - (peerPresence.ackAt ?? 0) <= PEER_ACK_TIMEOUT_MS
+              )
+              const peerConnected = Boolean(peerPresence && peerRecentlySeen && peerAckedLatestPing)
+              setConnectivityByPlayerId(() => {
+                const next: Record<string, boolean> = { [localPlayerId]: true }
+                if (peerPresence) {
+                  next[peerPresence.playerId] = peerConnected
+                }
+                return next
+              })
+              setConnectedPeers(
+                joinedSnapshot.participants
+                  .filter((participant) => participant.playerId !== localPlayerId)
+                  .filter((participant) => participant.playerId !== WAITING_OPPONENT_ID)
+                  .map((participant) => participant.playerId)
+              )
+
+              if (!peerPresence) {
+                setWaitingMessage('Waiting for opponent to connect...')
+              } else if (!peerRecentlySeen) {
+                setWaitingMessage(`Waiting for ${peerPresence.name} to reconnect...`)
+              } else if (!peerAckedLatestPing) {
+                setWaitingMessage(`Waiting for ${peerPresence.name} to respond...`)
+              } else {
+                setWaitingMessage(null)
+              }
+
+              if (peerPresence?.pingToken && peerPresence.pingToken !== acknowledgedPeerPingRef.current) {
+                acknowledgedPeerPingRef.current = peerPresence.pingToken
+                latestAckAtRef.current = now
+                queuePresenceUpdate({
+                  roomId: slug,
+                  playerId: localPlayerId,
+                  playerName,
+                  role: effectiveRole,
+                  joinedAt: localJoinedAtRef.current,
+                  pingToken: latestPingTokenRef.current || undefined,
+                  pingAt: latestPingAtRef.current || undefined,
+                  ackForPeerPingToken: peerPresence.pingToken,
+                  ackAt: now
+                })
+              }
+
+              roomReadyRef.current = true
+              activeGameIdRef.current = meta.currentGameId
+              activeActionsVersionRef.current = meta.actionsVersion
+              actionCounter.value = seedActionCounterFromLog(replayedActions, localPlayerId, actionCounter.value)
+              setState(replayedState)
+              setSyncError(null)
+              bootstrapInProgressRef.current = false
+              bootstrapRoomRef.current = null
+              bootstrapStartedAtRef.current = 0
+              saveRoomCache(slug, {
+                gameId: meta.currentGameId,
+                actionsVersion: meta.actionsVersion,
+                state: replayedState,
+                actions: replayedActions,
+                role: effectiveRole,
+                joinedAt
+              })
+              flushOutboundQueue(slug)
+              return
+            }
+          }
+        }
+
         const existing = await roomStore.fetchRoomSnapshot(slug)
         if (!existing.meta) {
           effectiveRole = 'host'
@@ -646,6 +811,7 @@ export default function App() {
 
           if (shouldRestartSession) {
             effectiveRole = 'host'
+            clearRoomCache(slug)
             snapshot = await roomStore.restartGameSession({
               roomId: slug,
               hostId: localPlayerId,
@@ -681,6 +847,7 @@ export default function App() {
         bootstrapRoomRef.current = null
         bootstrapStartedAtRef.current = 0
         activeGameIdRef.current = null
+        activeActionsVersionRef.current = 0
         roomReadyRef.current = false
         outboundActionQueueRef.current = []
         outboundFlushInFlightRef.current = false
@@ -697,7 +864,7 @@ export default function App() {
         setJoining(false)
       }
     },
-    [applySnapshot, localPlayerId, playerName, roomStore]
+    [actionCounter, applySnapshot, flushOutboundQueue, localPlayerId, playerName, queuePresenceUpdate, roomStore]
   )
 
   const roundRestartDecision = useMemo(
@@ -801,11 +968,19 @@ export default function App() {
     if (!roomSlug || !state) return
     const expectedGameId = activeGameIdRef.current
     if (!expectedGameId) return
-    const signature = `${expectedGameId}:${state.actionLog.length}:${state.phase}:${state.dealerSeat}:${state.turnSeat}:${state.turnStage}:${state.drawIndex}`
+    saveRoomCache(roomSlug, {
+      gameId: expectedGameId,
+      actionsVersion: activeActionsVersionRef.current,
+      state,
+      actions: state.actionLog,
+      role: roomRole,
+      joinedAt: localJoinedAtRef.current ?? Date.now()
+    })
+    const signature = `${expectedGameId}:${state.phase}`
     if (lastPersistedStateSignatureRef.current === signature) return
     lastPersistedStateSignatureRef.current = signature
     void roomStore.upsertGameState(roomSlug, state, expectedGameId).catch(() => undefined)
-  }, [roomSlug, roomStore, state])
+  }, [roomRole, roomSlug, roomStore, state])
 
   useEffect(() => {
     if (view !== 'lobby') return
@@ -1067,16 +1242,38 @@ export default function App() {
   useEffect(() => {
     if (!state || state.phase !== 'play') {
       autoDrawRef.current = ''
+      return
     }
-  }, [state?.phase])
+    const current = state.players.find((player) => player.seat === state.turnSeat)
+    if (!current || current.id !== localPlayerId || state.turnStage !== 'draw') {
+      autoDrawRef.current = ''
+    }
+  }, [localPlayerId, state])
 
   useEffect(() => {
     if (!import.meta.env.DEV) return
-    if (!state || state.phase !== 'initial') return
+    if (!state || state.phase !== 'initial') {
+      autoInitialPlacementRef.current = ''
+      return
+    }
     const myPending = state.pending[localPlayerId]
-    if (!myPending || myPending.length === 0) return
+    if (!myPending || myPending.length === 0) {
+      autoInitialPlacementRef.current = ''
+      return
+    }
     const myLines = state.lines[localPlayerId]
-    if (!myLines) return
+    if (!myLines) {
+      autoInitialPlacementRef.current = ''
+      return
+    }
+    if (!roomReadyRef.current) return
+    const gameId = activeGameIdRef.current
+    if (!gameId) return
+    const pendingSignature = myPending.map((card) => `${card.rank}${card.suit}`).join(',')
+    const linesSignature = `${myLines.top.length}-${myLines.middle.length}-${myLines.bottom.length}`
+    const autoPlacementKey = `${gameId}:${localPlayerId}:${linesSignature}:${pendingSignature}`
+    if (autoInitialPlacementRef.current === autoPlacementKey) return
+    autoInitialPlacementRef.current = autoPlacementKey
 
     const limits = { top: 3, middle: 5, bottom: 5 } as const
     const remaining = {
@@ -1089,20 +1286,27 @@ export default function App() {
     for (const row of ['bottom', 'middle', 'top'] as const) {
       for (let i = 0; i < remaining[row]; i += 1) rows.push(row)
     }
-    for (let i = rows.length - 1; i > 0; i -= 1) {
-      const j = Math.floor(Math.random() * (i + 1))
-      ;[rows[i], rows[j]] = [rows[j] as keyof typeof limits, rows[i] as keyof typeof limits]
-    }
     for (let i = 0; i < myPending.length; i += 1) {
       const card = myPending[i]
       const target = rows[i]
       if (!card || !target) break
-      actions.push({ id: nextActionId(), type: 'placeCard', playerId: localPlayerId, card, target })
+      actions.push({
+        id: buildInitialPlacementActionId({
+          gameId,
+          playerId: localPlayerId,
+          card,
+          target
+        }),
+        type: 'placeCard',
+        playerId: localPlayerId,
+        card,
+        target
+      })
     }
     if (actions.length > 0) {
       dispatchBatchAndSync(actions)
     }
-  }, [dispatchBatchAndSync, localPlayerId, nextActionId, state])
+  }, [dispatchBatchAndSync, localPlayerId, state])
 
   useEffect(() => {
     if (!state) return
@@ -1318,25 +1522,60 @@ export default function App() {
           roomName={roomSlug ?? undefined}
           connectivityByPlayerId={connectivityByPlayerId}
           waitingMessage={waitingMessage}
-          onPlace={(card, target) =>
+          onPlace={(card, target) => {
+            const parsedCard = stringToCard(card)
+            const gameId = activeGameIdRef.current
+            const actionId = gameId
+              ? buildPlayPlacementActionId({
+                  gameId,
+                  playerId: localPlayerId,
+                  card: parsedCard,
+                  target
+                })
+              : nextActionId()
             dispatchAndSync({
-              id: nextActionId(),
+              id: actionId,
               type: 'placeCard',
               playerId: localPlayerId,
-              card: stringToCard(card),
+              card: parsedCard,
               target
             })
-          }
+          }}
           onSubmitInitial={(draft) => {
             const actions: GameAction[] = []
+            const gameId = activeGameIdRef.current
             draft.top.forEach((card) => {
-              actions.push({ id: nextActionId(), type: 'placeCard', playerId: localPlayerId, card, target: 'top' })
+              const actionId = gameId
+                ? buildInitialPlacementActionId({
+                    gameId,
+                    playerId: localPlayerId,
+                    card,
+                    target: 'top'
+                  })
+                : nextActionId()
+              actions.push({ id: actionId, type: 'placeCard', playerId: localPlayerId, card, target: 'top' })
             })
             draft.middle.forEach((card) => {
-              actions.push({ id: nextActionId(), type: 'placeCard', playerId: localPlayerId, card, target: 'middle' })
+              const actionId = gameId
+                ? buildInitialPlacementActionId({
+                    gameId,
+                    playerId: localPlayerId,
+                    card,
+                    target: 'middle'
+                  })
+                : nextActionId()
+              actions.push({ id: actionId, type: 'placeCard', playerId: localPlayerId, card, target: 'middle' })
             })
             draft.bottom.forEach((card) => {
-              actions.push({ id: nextActionId(), type: 'placeCard', playerId: localPlayerId, card, target: 'bottom' })
+              const actionId = gameId
+                ? buildInitialPlacementActionId({
+                    gameId,
+                    playerId: localPlayerId,
+                    card,
+                    target: 'bottom'
+                  })
+                : nextActionId()
+              actions.push({ id: actionId, type: 'placeCard', playerId: localPlayerId, card, target: 'bottom' })
             })
             dispatchBatchAndSync(actions)
           }}

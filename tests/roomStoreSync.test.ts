@@ -22,6 +22,15 @@ class FakeFirebaseClient implements FirebaseRestClient {
       return options?.body as T
     }
     if (method === 'PATCH') {
+      if (typeof options?.body === 'object' && options.body !== null) {
+        const patchEntries = Object.entries(options.body as Record<string, unknown>)
+        if (patchEntries.some(([key]) => key.includes('/'))) {
+          patchEntries.forEach(([key, value]) => {
+            this.writePath([...segments, ...key.split('/').filter(Boolean)], value)
+          })
+          return this.readPath(segments) as T
+        }
+      }
       const current = this.readPath(segments)
       const merged =
         typeof current === 'object' && current !== null && typeof options?.body === 'object' && options.body !== null
@@ -84,6 +93,74 @@ class FakeFirebaseClient implements FirebaseRestClient {
   }
 }
 
+class SlowPollingFirebaseClient extends FakeFirebaseClient {
+  private metaGate: Promise<void> | null = null
+  private releaseMetaGate: (() => void) | null = null
+  private directoryDeleteGate: Promise<void> | null = null
+  private releaseDirectoryDeleteGate: (() => void) | null = null
+
+  metaGetInFlight = 0
+  maxMetaGetInFlight = 0
+  directoryDeleteInFlight = 0
+  maxDirectoryDeleteInFlight = 0
+  directoryDeleteCalls = 0
+
+  holdMetaGets() {
+    if (this.metaGate) return
+    this.metaGate = new Promise<void>((resolve) => {
+      this.releaseMetaGate = resolve
+    })
+  }
+
+  releaseMetaGets() {
+    this.releaseMetaGate?.()
+    this.metaGate = null
+    this.releaseMetaGate = null
+  }
+
+  holdDirectoryDeletes() {
+    if (this.directoryDeleteGate) return
+    this.directoryDeleteGate = new Promise<void>((resolve) => {
+      this.releaseDirectoryDeleteGate = resolve
+    })
+  }
+
+  releaseDirectoryDeletes() {
+    this.releaseDirectoryDeleteGate?.()
+    this.directoryDeleteGate = null
+    this.releaseDirectoryDeleteGate = null
+  }
+
+  override async requestJson<T>(path: string, options?: FirebaseRequestOptions): Promise<T> {
+    const method = options?.method ?? 'GET'
+
+    if (method === 'GET' && path.endsWith('/meta') && this.metaGate) {
+      this.metaGetInFlight += 1
+      this.maxMetaGetInFlight = Math.max(this.maxMetaGetInFlight, this.metaGetInFlight)
+      try {
+        await this.metaGate
+        return await super.requestJson(path, options)
+      } finally {
+        this.metaGetInFlight -= 1
+      }
+    }
+
+    if (method === 'DELETE' && path.startsWith('/roomDirectory/') && this.directoryDeleteGate) {
+      this.directoryDeleteCalls += 1
+      this.directoryDeleteInFlight += 1
+      this.maxDirectoryDeleteInFlight = Math.max(this.maxDirectoryDeleteInFlight, this.directoryDeleteInFlight)
+      try {
+        await this.directoryDeleteGate
+        return await super.requestJson(path, options)
+      } finally {
+        this.directoryDeleteInFlight -= 1
+      }
+    }
+
+    return super.requestJson(path, options)
+  }
+}
+
 type TimerTask = { id: number; callback: () => void }
 
 function createManualTimers() {
@@ -96,10 +173,10 @@ function createManualTimers() {
         nextId += 1
         tasks.set(id, { id, callback: callback as () => void })
         return id as unknown as ReturnType<typeof setInterval>
-      }) as typeof globalThis.setInterval,
+      }) as unknown as typeof globalThis.setInterval,
       clearInterval: ((id: number) => {
         tasks.delete(id)
-      }) as typeof globalThis.clearInterval
+      }) as unknown as typeof globalThis.clearInterval
     },
     tick: async () => {
       for (const task of [...tasks.values()]) {
@@ -176,6 +253,79 @@ describe('roomStore subscription sync', () => {
     expect(observedGameStateInclusion).toContain(true)
     expect(observedGameStateInclusion).toContain(false)
     expect(latestHydratedActionIds).toEqual(['p1-1', 'p2-1'])
+    unsubscribe()
+  })
+
+  it('coalesces overlapping snapshot polling ticks to one in-flight run', async () => {
+    let time = 100
+    const manual = createManualTimers()
+    const client = new SlowPollingFirebaseClient()
+    const store = createRoomStore({
+      client,
+      now: () => {
+        time += 5
+        return time
+      },
+      timers: manual.timers
+    })
+
+    await store.createRoom({
+      roomId: 'snapshot-overlap',
+      displayName: 'snapshot-overlap',
+      hostId: 'p1',
+      hostName: 'Host',
+      expectedPlayers: 2
+    })
+
+    client.holdMetaGets()
+    const unsubscribe = store.subscribeRoomSnapshot('snapshot-overlap', {
+      onUpdate: () => undefined
+    })
+
+    await Promise.resolve()
+    await manual.tick()
+    await manual.tick()
+
+    expect(client.maxMetaGetInFlight).toBe(1)
+
+    client.releaseMetaGets()
+    await manual.tick()
+    unsubscribe()
+  })
+
+  it('coalesces overlapping directory cleanup ticks to one in-flight cleanup run', async () => {
+    let nowValue = 100
+    const manual = createManualTimers()
+    const client = new SlowPollingFirebaseClient()
+    const store = createRoomStore({
+      client,
+      now: () => nowValue,
+      timers: manual.timers
+    })
+
+    await store.createRoom({
+      roomId: 'cleanup-overlap',
+      displayName: 'cleanup-overlap',
+      hostId: 'p1',
+      hostName: 'Host',
+      expectedPlayers: 2
+    })
+    nowValue = 100 + 6 * 60 * 1000
+
+    client.holdDirectoryDeletes()
+    const unsubscribe = store.subscribeRoomDirectory({
+      onUpdate: () => undefined
+    })
+
+    await Promise.resolve()
+    await manual.tick()
+    await manual.tick()
+
+    expect(client.directoryDeleteCalls).toBeGreaterThan(0)
+    expect(client.maxDirectoryDeleteInFlight).toBe(1)
+
+    client.releaseDirectoryDeletes()
+    await manual.tick()
     unsubscribe()
   })
 })

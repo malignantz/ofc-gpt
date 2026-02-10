@@ -54,6 +54,13 @@ class FakeSdkDeps {
   }
 
   update = async (reference: FakeReference, value: unknown) => {
+    if (isRecord(value)) {
+      const entries = Object.entries(value)
+      if (entries.some(([key]) => key.includes('/'))) {
+        entries.forEach(([key, entryValue]) => this.write(`${reference.path}/${key}`, entryValue))
+        return
+      }
+    }
     const current = this.read(reference.path)
     if (isRecord(current) && isRecord(value)) {
       this.write(reference.path, { ...current, ...value })
@@ -282,25 +289,36 @@ describe('firebaseSdkClient', () => {
     expect(added).toEqual(['a1'])
   })
 
-  it('rate limits sdk-backed requests to at most one per second', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+  it('does not serialize sdk-backed requests behind a global delay', async () => {
     const deps = new FakeSdkDeps()
+    const originalSet = deps.set
+    let setCallCount = 0
+    let releaseFirstSet: () => void = () => undefined
+    const firstSetGate = new Promise<void>((resolve) => {
+      releaseFirstSet = () => resolve()
+    })
+    deps.set = async (reference, value) => {
+      setCallCount += 1
+      if (setCallCount === 1) {
+        await firstSetGate
+      }
+      return originalSet(reference, value)
+    }
     const client = createFirebaseSdkClient({ config, deps: deps as never })
 
-    await client.requestJson('/rooms/first', { method: 'PUT', body: { ok: 1 } })
-    expect(deps.readPath('rooms/first')).toEqual({ ok: 1 })
-
+    const firstRequest = client.requestJson('/rooms/first', { method: 'PUT', body: { ok: 1 } })
+    await Promise.resolve()
     const secondRequest = client.requestJson('/rooms/second', { method: 'PUT', body: { ok: 2 } })
     await Promise.resolve()
-    expect(deps.readPath('rooms/second')).toBeNull()
 
-    await vi.advanceTimersByTimeAsync(999)
-    expect(deps.readPath('rooms/second')).toBeNull()
-
-    await vi.advanceTimersByTimeAsync(1)
-    await secondRequest
+    expect(setCallCount).toBe(2)
+    expect(deps.readPath('rooms/first')).toBeNull()
     expect(deps.readPath('rooms/second')).toEqual({ ok: 2 })
+
+    releaseFirstSet()
+    await firstRequest
+    await secondRequest
+    expect(deps.readPath('rooms/first')).toEqual({ ok: 1 })
   })
 })
 

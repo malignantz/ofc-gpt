@@ -83,7 +83,8 @@ export type RoomStore = {
     roomId: string
     playerId: string
     playerName: string
-    role: RoomRole
+    role?: RoomRole
+    includeSnapshot?: boolean
   }) => Promise<RoomSnapshot>
   restartGameSession: (input: {
     roomId: string
@@ -114,6 +115,8 @@ export type RoomStore = {
     roomId: string,
     options?: { includeParticipants?: boolean; includeActions?: boolean; includeGameState?: boolean }
   ) => Promise<RoomSnapshot>
+  fetchRoomMeta: (roomId: string) => Promise<RoomMeta | null>
+  fetchRoomActions: (roomId: string, options?: { gameId?: string | null }) => Promise<ActionRecord[]>
   upsertGameState: (roomId: string, state: GameState, expectedGameId?: string) => Promise<boolean>
   subscribeRoomSnapshot: (
     roomId: string,
@@ -388,6 +391,23 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
   const withRoomPath = (roomId: string) => `/rooms/${roomKey(roomId)}`
   const withDirectoryPath = (roomId: string) => `/roomDirectory/${roomKey(roomId)}`
   const lastLivenessRefreshByRoom = new Map<string, number>()
+  const metaCacheByRoom = new Map<string, RoomMeta>()
+  const appendQueueByRoom = new Map<string, Promise<void>>()
+
+  const runAppendSerialized = <T>(roomId: string, run: () => Promise<T>): Promise<T> => {
+    const previous = appendQueueByRoom.get(roomId) ?? Promise.resolve()
+    const result = previous.then(() => run())
+    const settled = result.then(
+      () => undefined,
+      () => undefined
+    )
+    appendQueueByRoom.set(roomId, settled)
+    return result.finally(() => {
+      if (appendQueueByRoom.get(roomId) === settled) {
+        appendQueueByRoom.delete(roomId)
+      }
+    })
+  }
 
   const parseAndMaybeMigrateMeta = async (roomId: string, rawMeta: unknown): Promise<RoomMeta | null> => {
     let meta = parseMeta(rawMeta)
@@ -423,7 +443,13 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
 
   const fetchMeta = async (roomId: string): Promise<RoomMeta | null> => {
     const rawMeta = await client.requestJson<unknown>(`${withRoomPath(roomId)}/meta`)
-    return parseAndMaybeMigrateMeta(roomId, rawMeta)
+    const meta = await parseAndMaybeMigrateMeta(roomId, rawMeta)
+    if (meta) {
+      metaCacheByRoom.set(roomId, meta)
+    } else {
+      metaCacheByRoom.delete(roomId)
+    }
+    return meta
   }
 
   const fetchParticipants = async (roomId: string): Promise<ParticipantPresence[]> => {
@@ -493,6 +519,17 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
       gameState,
       gameStateIncluded: includeGameState
     }
+  }
+
+  const fetchRoomMeta = async (roomId: string): Promise<RoomMeta | null> => {
+    return fetchMeta(roomKey(roomId))
+  }
+
+  const fetchRoomActions = async (roomId: string, options?: { gameId?: string | null }): Promise<ActionRecord[]> => {
+    const normalizedRoom = roomKey(roomId)
+    const activeGameId =
+      options?.gameId === undefined ? (await fetchMeta(normalizedRoom))?.currentGameId ?? null : options.gameId
+    return fetchActions(normalizedRoom, activeGameId)
   }
 
   const maybeRefreshLiveness = async (roomId: string, currentTime: number): Promise<void> => {
@@ -569,6 +606,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
       gameState
     }
     await client.requestJson(withRoomPath(normalizedRoom), { method: 'PUT', body: roomPayload })
+    metaCacheByRoom.set(normalizedRoom, meta)
     const directoryEntry: RoomDirectoryEntry = {
       roomId: normalizedRoom,
       displayName: input.displayName.trim() || normalizedRoom,
@@ -588,9 +626,11 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     roomId: string
     playerId: string
     playerName: string
-    role: RoomRole
+    role?: RoomRole
+    includeSnapshot?: boolean
   }): Promise<RoomSnapshot> => {
     const normalizedRoom = roomKey(input.roomId)
+    const includeSnapshot = input.includeSnapshot ?? true
     const snapshot = await fetchRoomSnapshot(normalizedRoom, {
       includeParticipants: true,
       includeActions: false,
@@ -610,11 +650,15 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     if (!existing && snapshot.participants.length >= snapshot.meta.expectedPlayers) {
       throw new Error(`Room "${normalizedRoom}" is full.`)
     }
+    const role: RoomRole =
+      existing?.role ??
+      input.role ??
+      (snapshot.participants.some((participant) => participant.role === 'host') ? 'guest' : 'host')
     const currentTime = now()
     const presence = buildPresenceUpdate({
       playerId: input.playerId,
       playerName: input.playerName,
-      role: input.role,
+      role,
       joinedAt: existing?.joinedAt ?? currentTime,
       lastSeenAt: currentTime
     })
@@ -623,7 +667,16 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
       body: presence
     })
     await refreshDirectory(normalizedRoom)
-    return fetchRoomSnapshot(normalizedRoom)
+    if (includeSnapshot) return fetchRoomSnapshot(normalizedRoom)
+    const participants = [...snapshot.participants.filter((participant) => participant.playerId !== input.playerId), presence]
+    return {
+      roomId: normalizedRoom,
+      meta: snapshot.meta,
+      participants,
+      actions: [],
+      gameState: null,
+      gameStateIncluded: false
+    }
   }
 
   const restartGameSession = async (input: {
@@ -692,6 +745,17 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
         actions: {},
         gameState
       }
+    })
+    metaCacheByRoom.set(normalizedRoom, {
+      ...snapshot.meta,
+      hostId: input.hostId,
+      expectedPlayers,
+      currentGameId,
+      actionsVersion: 0,
+      dealerSeat: 0,
+      status: 'waiting',
+      updatedAt: currentTime,
+      expiresAt: currentTime + ROOM_TTL_MS
     })
     await client.requestJson(withDirectoryPath(normalizedRoom), {
       method: 'PUT',
@@ -784,6 +848,17 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
         expiresAt: currentTime + ROOM_TTL_MS
       } satisfies Partial<RoomMeta>
     })
+    metaCacheByRoom.set(normalizedRoom, {
+      ...snapshot.meta,
+      hostId: hostPlayer.id,
+      expectedPlayers,
+      currentGameId,
+      actionsVersion: 0,
+      dealerSeat: nextDealerSeat,
+      status: 'waiting',
+      updatedAt: currentTime,
+      expiresAt: currentTime + ROOM_TTL_MS
+    })
     await client.requestJson(`${withRoomPath(normalizedRoom)}/actions`, { method: 'PUT', body: {} })
     await client.requestJson(`${withRoomPath(normalizedRoom)}/gameState`, {
       method: 'PUT',
@@ -807,6 +882,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     if (snapshot.participants.length === 0) {
       await client.requestJson(withRoomPath(normalizedRoom), { method: 'DELETE' })
       await client.requestJson(withDirectoryPath(normalizedRoom), { method: 'DELETE' })
+      metaCacheByRoom.delete(normalizedRoom)
       return
     }
     await refreshDirectory(normalizedRoom)
@@ -848,7 +924,9 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
   const upsertGameState = async (roomId: string, state: GameState, expectedGameId?: string): Promise<boolean> => {
     const normalizedRoom = roomKey(roomId)
     if (expectedGameId) {
-      const meta = await fetchMeta(normalizedRoom)
+      const cachedMeta = metaCacheByRoom.get(normalizedRoom)
+      const meta =
+        cachedMeta && cachedMeta.currentGameId === expectedGameId ? cachedMeta : await fetchMeta(normalizedRoom)
       if (!meta) return false
       if (meta.currentGameId !== expectedGameId) return false
     }
@@ -872,33 +950,36 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     expectedGameId?: string
   }): Promise<ActionRecord | null> => {
     const normalizedRoom = roomKey(input.roomId)
-    const meta = await fetchMeta(normalizedRoom)
-    if (!meta) {
-      throw new Error(`Room "${normalizedRoom}" does not exist.`)
-    }
-    if (input.expectedGameId && meta.currentGameId !== input.expectedGameId) {
-      // Stale action for a prior round/session; ignore.
-      return null
-    }
-    const gameId = meta.currentGameId
-    const actionKey = toStoredActionKey(gameId, input.action.id)
-    const existing = await client.requestJson<unknown>(
-      `${withRoomPath(normalizedRoom)}/actions/${encodeURIComponent(actionKey)}`
-    )
-    if (existing !== null) return null
+    return runAppendSerialized(normalizedRoom, async () => {
+      const cachedMeta = metaCacheByRoom.get(normalizedRoom)
+      const needsRefresh = !cachedMeta || (input.expectedGameId && cachedMeta.currentGameId !== input.expectedGameId)
+      const meta = needsRefresh ? await fetchMeta(normalizedRoom) : cachedMeta
+      if (!meta) {
+        throw new Error(`Room "${normalizedRoom}" does not exist.`)
+      }
+      if (input.expectedGameId && meta.currentGameId !== input.expectedGameId) {
+        // Stale action for a prior round/session; ignore.
+        return null
+      }
+      const gameId = meta.currentGameId
+      const actionKey = toStoredActionKey(gameId, input.action.id)
+      const existing = await client.requestJson<unknown>(
+        `${withRoomPath(normalizedRoom)}/actions/${encodeURIComponent(actionKey)}`
+      )
+      if (existing !== null) return null
 
-    const record = buildActionRecord(input.action, input.actorId, now(), gameId)
-    await client.requestJson(`${withRoomPath(normalizedRoom)}/actions/${encodeURIComponent(actionKey)}`, {
-      method: 'PUT',
-      body: record
+      const record = buildActionRecord(input.action, input.actorId, now(), gameId)
+      const nextActionsVersion = (meta.actionsVersion ?? 0) + 1
+      await client.requestJson(withRoomPath(normalizedRoom), {
+        method: 'PATCH',
+        body: {
+          [`actions/${actionKey}`]: record,
+          'meta/actionsVersion': nextActionsVersion
+        } satisfies Record<string, unknown>
+      })
+      metaCacheByRoom.set(normalizedRoom, { ...meta, actionsVersion: nextActionsVersion })
+      return record
     })
-    await client.requestJson(`${withRoomPath(normalizedRoom)}/meta`, {
-      method: 'PATCH',
-      body: {
-        actionsVersion: (meta.actionsVersion ?? 0) + 1
-      } satisfies Partial<RoomMeta>
-    })
-    return record
   }
 
   const fetchRoomDirectory = async (): Promise<RoomDirectoryEntry[]> => {
@@ -927,6 +1008,7 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     for (const rawId of expiredRoomIds) {
       await client.requestJson(`/roomDirectory/${rawId}`, { method: 'DELETE' })
       await client.requestJson(`/rooms/${rawId}`, { method: 'DELETE' })
+      metaCacheByRoom.delete(rawId)
     }
     return expiredRoomIds.length
   }
@@ -936,6 +1018,8 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     handlers: { onUpdate: (snapshot: RoomSnapshot) => void; onError?: (error: Error) => void }
   ): (() => void) => {
     let active = true
+    let inFlight = false
+    let rerunRequested = false
     let pollCount = 0
     let cachedParticipants: ParticipantPresence[] = []
     let cachedActions: ActionRecord[] = []
@@ -945,63 +1029,75 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
 
     const run = async () => {
       if (!active) return
+      if (inFlight) {
+        rerunRequested = true
+        return
+      }
+      inFlight = true
       try {
-        const includeGameState = pollCount === 0 || pollCount % SNAPSHOT_GAME_STATE_REFRESH_POLLS === 0
-        const includeParticipants = pollCount === 0 || pollCount % SNAPSHOT_PARTICIPANTS_REFRESH_POLLS === 0
-        const includeActionsRefresh = pollCount === 0 || pollCount % SNAPSHOT_ACTIONS_REFRESH_POLLS === 0
-        pollCount += 1
-        const meta = await fetchMeta(roomId)
-        if (!meta) {
-          cachedParticipants = []
-          cachedActions = []
-          cachedGameState = null
-          cachedGameId = null
-          cachedActionsVersion = -1
-          const snapshot: RoomSnapshot = {
-            roomId: roomKey(roomId),
-            meta: null,
-            participants: [],
-            actions: [],
-            gameState: null,
-            gameStateIncluded: includeGameState
+        do {
+          rerunRequested = false
+          try {
+            const includeGameState = pollCount === 0 || pollCount % SNAPSHOT_GAME_STATE_REFRESH_POLLS === 0
+            const includeParticipants = pollCount === 0 || pollCount % SNAPSHOT_PARTICIPANTS_REFRESH_POLLS === 0
+            const includeActionsRefresh = pollCount === 0 || pollCount % SNAPSHOT_ACTIONS_REFRESH_POLLS === 0
+            pollCount += 1
+            const meta = await fetchMeta(roomId)
+            if (!meta) {
+              cachedParticipants = []
+              cachedActions = []
+              cachedGameState = null
+              cachedGameId = null
+              cachedActionsVersion = -1
+              const snapshot: RoomSnapshot = {
+                roomId: roomKey(roomId),
+                meta: null,
+                participants: [],
+                actions: [],
+                gameState: null,
+                gameStateIncluded: includeGameState
+              }
+              if (!active) return
+              handlers.onUpdate(snapshot)
+              continue
+            }
+
+            if (includeParticipants || cachedParticipants.length === 0) {
+              cachedParticipants = await fetchParticipants(roomId)
+            }
+
+            const shouldFetchActions =
+              includeActionsRefresh ||
+              cachedActions.length === 0 ||
+              cachedGameId !== meta.currentGameId ||
+              cachedActionsVersion !== meta.actionsVersion
+            if (shouldFetchActions) {
+              cachedActions = await fetchActions(roomId, meta.currentGameId)
+              cachedGameId = meta.currentGameId
+              cachedActionsVersion = meta.actionsVersion
+            }
+
+            if (includeGameState) {
+              cachedGameState = await fetchPersistedGameState(roomId)
+            }
+
+            const snapshot: RoomSnapshot = {
+              roomId: roomKey(roomId),
+              meta,
+              participants: cachedParticipants,
+              actions: cachedActions,
+              gameState: includeGameState ? cachedGameState : null,
+              gameStateIncluded: includeGameState
+            }
+            if (!active) return
+            handlers.onUpdate(snapshot)
+          } catch (error) {
+            if (!active) return
+            handlers.onError?.(toError(error, 'Failed to fetch room snapshot'))
           }
-          if (!active) return
-          handlers.onUpdate(snapshot)
-          return
-        }
-
-        if (includeParticipants || cachedParticipants.length === 0) {
-          cachedParticipants = await fetchParticipants(roomId)
-        }
-
-        const shouldFetchActions =
-          includeActionsRefresh ||
-          cachedActions.length === 0 ||
-          cachedGameId !== meta.currentGameId ||
-          cachedActionsVersion !== meta.actionsVersion
-        if (shouldFetchActions) {
-          cachedActions = await fetchActions(roomId, meta.currentGameId)
-          cachedGameId = meta.currentGameId
-          cachedActionsVersion = meta.actionsVersion
-        }
-
-        if (includeGameState) {
-          cachedGameState = await fetchPersistedGameState(roomId)
-        }
-
-        const snapshot: RoomSnapshot = {
-          roomId: roomKey(roomId),
-          meta,
-          participants: cachedParticipants,
-          actions: cachedActions,
-          gameState: includeGameState ? cachedGameState : null,
-          gameStateIncluded: includeGameState
-        }
-        if (!active) return
-        handlers.onUpdate(snapshot)
-      } catch (error) {
-        if (!active) return
-        handlers.onError?.(toError(error, 'Failed to fetch room snapshot'))
+        } while (active && rerunRequested)
+      } finally {
+        inFlight = false
       }
     }
     void run()
@@ -1195,23 +1291,53 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     handlers: { onUpdate: (rooms: RoomDirectoryEntry[]) => void; onError?: (error: Error) => void }
   ): (() => void) => {
     let active = true
+    let pollInFlight = false
+    let pollRerunRequested = false
+    let cleanupInFlight = false
+    let cleanupRerunRequested = false
+
     const run = async () => {
       if (!active) return
+      if (pollInFlight) {
+        pollRerunRequested = true
+        return
+      }
+      pollInFlight = true
       try {
-        const rooms = await fetchRoomDirectory()
-        if (!active) return
-        handlers.onUpdate(rooms)
-      } catch (error) {
-        if (!active) return
-        handlers.onError?.(toError(error, 'Failed to fetch room directory'))
+        do {
+          pollRerunRequested = false
+          try {
+            const rooms = await fetchRoomDirectory()
+            if (!active) return
+            handlers.onUpdate(rooms)
+          } catch (error) {
+            if (!active) return
+            handlers.onError?.(toError(error, 'Failed to fetch room directory'))
+          }
+        } while (active && pollRerunRequested)
+      } finally {
+        pollInFlight = false
       }
     }
+
     const runCleanup = async () => {
       if (!active) return
+      if (cleanupInFlight) {
+        cleanupRerunRequested = true
+        return
+      }
+      cleanupInFlight = true
       try {
-        await cleanupExpiredRooms()
-      } catch {
-        // Best-effort cleanup in v1.
+        do {
+          cleanupRerunRequested = false
+          try {
+            await cleanupExpiredRooms()
+          } catch {
+            // Best-effort cleanup in v1.
+          }
+        } while (active && cleanupRerunRequested)
+      } finally {
+        cleanupInFlight = false
       }
     }
     void runCleanup()
@@ -1235,6 +1361,8 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     let active = true
     let fallbackTriggered = false
     let fallbackUnsubscribe: (() => void) | null = null
+    let cleanupInFlight = false
+    let cleanupRerunRequested = false
 
     const emitRooms = (directoryNode: unknown) => {
       if (!active || fallbackTriggered) return
@@ -1263,10 +1391,22 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
 
     const runCleanup = async () => {
       if (!active || fallbackTriggered) return
+      if (cleanupInFlight) {
+        cleanupRerunRequested = true
+        return
+      }
+      cleanupInFlight = true
       try {
-        await cleanupExpiredRooms()
-      } catch {
-        // Best-effort cleanup in v1.
+        do {
+          cleanupRerunRequested = false
+          try {
+            await cleanupExpiredRooms()
+          } catch {
+            // Best-effort cleanup in v1.
+          }
+        } while (active && !fallbackTriggered && cleanupRerunRequested)
+      } finally {
+        cleanupInFlight = false
       }
     }
 
@@ -1319,6 +1459,8 @@ export function createRoomStore(options?: StoreOptions): RoomStore {
     touchPresence,
     appendAction,
     fetchRoomSnapshot,
+    fetchRoomMeta,
+    fetchRoomActions,
     upsertGameState,
     subscribeRoomSnapshot,
     fetchRoomDirectory,

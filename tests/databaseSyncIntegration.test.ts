@@ -22,6 +22,15 @@ class FakeFirebaseClient implements FirebaseRestClient {
       return options?.body as T
     }
     if (method === 'PATCH') {
+      if (typeof options?.body === 'object' && options.body !== null) {
+        const patchEntries = Object.entries(options.body as Record<string, unknown>)
+        if (patchEntries.some(([key]) => key.includes('/'))) {
+          patchEntries.forEach(([key, value]) => {
+            this.writePath([...segments, ...key.split('/').filter(Boolean)], value)
+          })
+          return this.readPath(segments) as T
+        }
+      }
       const current = this.readPath(segments)
       const merged =
         typeof current === 'object' && current !== null && typeof options?.body === 'object' && options.body !== null

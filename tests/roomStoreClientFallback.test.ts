@@ -13,7 +13,7 @@ describe('roomStore client fallback', () => {
       isConfigured: true,
       baseUrl: 'https://fallback.firebaseio.test',
       supportsRealtime: false,
-      requestJson: vi.fn(async () => null)
+      requestJson: async <T>() => null as T
     }
     const sdkSpy = vi.spyOn(firebaseSdkClient, 'createFirebaseSdkClient').mockImplementation(() => {
       throw new Error('sdk init failed')
@@ -29,4 +29,3 @@ describe('roomStore client fallback', () => {
     expect(warnSpy).toHaveBeenCalled()
   })
 })
-

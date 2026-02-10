@@ -92,14 +92,26 @@ describe('firebaseClient requests', () => {
     )
   })
 
-  it('rate limits requests to at most one per second', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      text: async () => '{}'
-    }))
+  it('does not serialize concurrent requests behind a global delay', async () => {
+    let resolveFirst: () => void = () => undefined
+    const firstResponseGate = new Promise<void>((resolve) => {
+      resolveFirst = () => resolve()
+    })
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        await firstResponseGate
+        return {
+          ok: true,
+          status: 200,
+          text: async () => '{"ok":1}'
+        }
+      })
+      .mockImplementationOnce(async () => ({
+        ok: true,
+        status: 200,
+        text: async () => '{"ok":2}'
+      }))
     vi.stubGlobal('fetch', fetchMock)
 
     const client = createFirebaseRestClient({
@@ -110,18 +122,16 @@ describe('firebaseClient requests', () => {
       appId: 'app'
     })
 
-    await client.requestJson('/rooms/first')
+    const firstRequest = client.requestJson('/rooms/first')
+    await Promise.resolve()
     expect(fetchMock).toHaveBeenCalledTimes(1)
 
     const secondRequest = client.requestJson('/rooms/second')
     await Promise.resolve()
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-
-    await vi.advanceTimersByTimeAsync(999)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-
-    await vi.advanceTimersByTimeAsync(1)
-    await secondRequest
     expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    resolveFirst()
+    await firstRequest
+    await secondRequest
   })
 })
