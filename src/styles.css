@@ -290,6 +290,20 @@ body {
   color: #3f352c;
 }
 
+.button.cpu-cta {
+  background: linear-gradient(180deg, #fff4dd 0%, #f6ddae 100%);
+  color: #2f2519;
+  border: 1px solid #8b6d3d;
+  margin-right: 6px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 1px 2px rgba(47, 37, 25, 0.16);
+}
+
+.button.cpu-cta:hover:not(:disabled) {
+  filter: none;
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 4px 10px rgba(47, 37, 25, 0.2);
+}
+
 .btn-sm {
   padding: 6px 10px;
   font-size: 12px;

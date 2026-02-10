@@ -60,6 +60,7 @@ export type GameTableProps = {
   onPlace: (card: string, target: keyof LinesState) => void
   onSubmitInitial: (draft: LinesState) => void
   onResetRound: () => void
+  onLeaveGame?: () => void
   canStartNextRound?: boolean
   nextRoundLabel?: string
   nextRoundHint?: string | null
@@ -76,6 +77,7 @@ export function GameTable({
   onPlace,
   onSubmitInitial,
   onResetRound,
+  onLeaveGame,
   canStartNextRound = true,
   nextRoundLabel = 'Next Round',
   nextRoundHint = null,
@@ -555,6 +557,11 @@ export function GameTable({
           </div>
         </div>
         <div className="table-actions">
+          {onLeaveGame ? (
+            <button className="button secondary btn-sm" onClick={onLeaveGame}>
+              Leave Game
+            </button>
+          ) : null}
           {state.phase === 'initial' && (
             <>
               <button className="button secondary btn-sm" onClick={resetInitial}>

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { buildDeck } from '../engine/deck'
 import { stringToCard } from '../engine/cards'
 import { combineSeeds, commitSeed, createSeedPair } from '../crypto/commitReveal'
-import { GameAction, GameState } from '../state/gameState'
+import { GameAction, GameState, Player, initialGameState } from '../state/gameState'
 import { applyAction } from '../state/reducer'
 import { Lobby } from './components/Lobby'
 import { GameTable } from './components/GameTable'
@@ -19,8 +20,10 @@ import {
   RoomRole,
   RoomSnapshot
 } from '../sync/roomStore'
+import { planCpuActions } from '../strategy/cpuPlanner'
 
 export type View = 'lobby' | 'table'
+type GameMode = 'online' | 'cpu_local'
 type QueuedOutboundAction = { action: GameAction; gameId: string | null }
 type PresenceUpdateInput = {
   roomId: string
@@ -41,7 +44,19 @@ const MIN_PRESENCE_WRITE_MS = 1_000
 const PEER_PING_TIMEOUT_MS = HEARTBEAT_MS * 3
 const PEER_ACK_TIMEOUT_MS = HEARTBEAT_MS * 4
 const BOOTSTRAP_WARNING_GRACE_MS = 8_000
+const CPU_LOCAL_SESSION_KEY = 'ofc:cpu-local-session-v1'
+const CPU_BOT_ID = '__cpu_bot__'
+const CPU_BOT_NAME = 'CPU'
+const CPU_ACTION_DELAY_MS = 650
 const DEFAULT_PLAYER_NAMES = ['Bert', 'Ernie', 'Elmo', 'Oscar', 'Cookie Monster', 'Big Bird'] as const
+
+type CpuLocalSession = {
+  version: 1
+  localPlayerId: string
+  state: GameState
+  actionCounter: number
+  savedAt: number
+}
 
 function generatePlayerId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -96,6 +111,47 @@ function writeLocalPlayerName(name: string) {
   } catch {
     // Ignore storage write failures.
   }
+}
+
+function readCpuLocalSession(): CpuLocalSession | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(CPU_LOCAL_SESSION_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<CpuLocalSession> | null
+    if (!parsed || parsed.version !== 1) return null
+    if (!parsed.localPlayerId || typeof parsed.localPlayerId !== 'string') return null
+    if (!parsed.state || typeof parsed.state !== 'object') return null
+    if (typeof parsed.actionCounter !== 'number') return null
+    if (typeof parsed.savedAt !== 'number') return null
+    return parsed as CpuLocalSession
+  } catch {
+    return null
+  }
+}
+
+function writeCpuLocalSession(session: CpuLocalSession) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(CPU_LOCAL_SESSION_KEY, JSON.stringify(session))
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
+function clearCpuLocalSession() {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.removeItem(CPU_LOCAL_SESSION_KEY)
+  } catch {
+    // Ignore storage remove failures.
+  }
+}
+
+function isCpuLocalState(state: GameState, localPlayerId: string): boolean {
+  const local = state.players.find((player) => player.id === localPlayerId)
+  const cpu = state.players.find((player) => player.id === CPU_BOT_ID)
+  return Boolean(local && cpu && state.players.length === 2)
 }
 
 function getParamInsensitive(params: URLSearchParams, key: string): string | null {
@@ -212,7 +268,9 @@ const RULES_SECTIONS: Array<{ title: string; bullets: string[] }> = [
 
 export default function App() {
   const roomStore = useMemo(() => createRoomStore(), [])
+  const knownDeck = useMemo(() => buildDeck(), [])
   const [view, setView] = useState<View>('lobby')
+  const [gameMode, setGameMode] = useState<GameMode>('online')
   const [playerCount, setPlayerCount] = useState(2)
   const [playerName, setPlayerName] = useState(() => readLocalPlayerName())
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -258,6 +316,8 @@ export default function App() {
   const bootstrapStartedAtRef = useRef(0)
   const activeGameIdRef = useRef<string | null>(null)
   const activeActionsVersionRef = useRef(0)
+  const cpuPlannerTimeoutRef = useRef<number | null>(null)
+  const cpuPlannerKeyRef = useRef('')
   const roomReadyRef = useRef(false)
   const outboundActionQueueRef = useRef<QueuedOutboundAction[]>([])
   const outboundFlushInFlightRef = useRef(false)
@@ -554,6 +614,7 @@ export default function App() {
     }
     roomSlugRef.current = null
     setRoomSlug(null)
+    setGameMode('online')
     setState(null)
     setConnectedPeers([])
     setParticipantPresenceById({})
@@ -562,6 +623,7 @@ export default function App() {
     setView('lobby')
     setJoining(false)
     setSyncError(null)
+    clearCpuLocalSession()
     lastHydrationSignatureRef.current = ''
     latestPingTokenRef.current = ''
     latestPingAtRef.current = 0
@@ -573,6 +635,11 @@ export default function App() {
     bootstrapStartedAtRef.current = 0
     activeGameIdRef.current = null
     activeActionsVersionRef.current = 0
+    cpuPlannerKeyRef.current = ''
+    if (cpuPlannerTimeoutRef.current !== null) {
+      window.clearTimeout(cpuPlannerTimeoutRef.current)
+      cpuPlannerTimeoutRef.current = null
+    }
     roomReadyRef.current = false
     outboundActionQueueRef.current = []
     outboundFlushInFlightRef.current = false
@@ -589,31 +656,103 @@ export default function App() {
   const dispatchAndSync = useCallback(
     (action: GameAction) => {
       dispatchAction(action)
+      if (gameMode === 'cpu_local') return
       const activeRoom = roomSlugRef.current
       if (!activeRoom) return
       queueOutboundAction(action, activeGameIdRef.current)
       if (!roomReadyRef.current) return
       flushOutboundQueue(activeRoom)
     },
-    [dispatchAction, flushOutboundQueue, queueOutboundAction]
+    [dispatchAction, flushOutboundQueue, gameMode, queueOutboundAction]
   )
 
   const dispatchBatchAndSync = useCallback(
     (actions: GameAction[]) => {
       dispatchActions(actions)
+      if (gameMode === 'cpu_local') return
       const activeRoom = roomSlugRef.current
       if (!activeRoom) return
       actions.forEach((action) => queueOutboundAction(action, activeGameIdRef.current))
       if (!roomReadyRef.current) return
       flushOutboundQueue(activeRoom)
     },
-    [dispatchActions, flushOutboundQueue, queueOutboundAction]
+    [dispatchActions, flushOutboundQueue, gameMode, queueOutboundAction]
   )
+
+  const startCpuGame = useCallback(async () => {
+    const previousRoom = roomSlugRef.current
+    if (previousRoom) {
+      await roomStore.leaveRoom(previousRoom, localPlayerId).catch(() => undefined)
+      clearRoomCache(previousRoom)
+    }
+
+    const localPlayer: Player = {
+      id: localPlayerId,
+      name: playerName,
+      seat: 0,
+      connected: true,
+      ready: false
+    }
+    const cpuPlayer: Player = {
+      id: CPU_BOT_ID,
+      name: CPU_BOT_NAME,
+      seat: 1,
+      connected: true,
+      ready: false
+    }
+
+    const localState = initialGameState([localPlayer, cpuPlayer])
+    actionCounter.value = seedActionCounterFromLog(localState.actionLog, localPlayerId, 0)
+    clearCpuLocalSession()
+
+    roomSlugRef.current = null
+    setRoomSlug(null)
+    setGameMode('cpu_local')
+    setView('table')
+    setRoomRole('host')
+    setPlayerCount(2)
+    setConnectedPeers([CPU_BOT_ID])
+    setParticipantPresenceById({})
+    setConnectivityByPlayerId({ [localPlayerId]: true, [CPU_BOT_ID]: true })
+    setWaitingMessage(null)
+    setSyncError(null)
+    setJoining(false)
+    setState(localState)
+
+    lastHydrationSignatureRef.current = ''
+    lastPersistedStateSignatureRef.current = ''
+    latestPingTokenRef.current = ''
+    latestPingAtRef.current = 0
+    latestAckAtRef.current = 0
+    acknowledgedPeerPingRef.current = ''
+    bootstrapInProgressRef.current = false
+    bootstrapRoomRef.current = null
+    bootstrapStartedAtRef.current = 0
+    activeGameIdRef.current = null
+    activeActionsVersionRef.current = 0
+    cpuPlannerKeyRef.current = ''
+    if (cpuPlannerTimeoutRef.current !== null) {
+      window.clearTimeout(cpuPlannerTimeoutRef.current)
+      cpuPlannerTimeoutRef.current = null
+    }
+    roomReadyRef.current = false
+    outboundActionQueueRef.current = []
+    outboundFlushInFlightRef.current = false
+    localJoinedAtRef.current = undefined
+    lastPresenceWriteAtRef.current = 0
+    pendingPresenceUpdateRef.current = null
+    presenceWriteInFlightRef.current = false
+    if (presenceWriteTimerRef.current !== null) {
+      window.clearTimeout(presenceWriteTimerRef.current)
+      presenceWriteTimerRef.current = null
+    }
+  }, [actionCounter, localPlayerId, playerName, roomStore])
 
   const startDatabaseGame = useCallback(
     async (room: string, host: boolean) => {
       const slug = toRoomSlug(room)
       if (!slug) return
+      clearCpuLocalSession()
       if (!roomStore.isConfigured) {
         setSyncError('Firebase is not configured. Set VITE_FIREBASE_DATABASE_URL and related env vars.')
         return
@@ -625,6 +764,7 @@ export default function App() {
         clearRoomCache(previousRoom)
       }
 
+      setGameMode('online')
       setView('table')
       setRoomSlug(slug)
       roomSlugRef.current = slug
@@ -879,8 +1019,21 @@ export default function App() {
       }),
     [connectivityByPlayerId, localPlayerId, participantPresenceById, state]
   )
+  const canStartNextRound =
+    gameMode === 'cpu_local' && state?.phase === 'score' ? true : roundRestartDecision.canStartNextRound
+  const nextRoundLabel =
+    gameMode === 'cpu_local' && state?.phase === 'score' ? 'Next Round' : roundRestartDecision.nextRoundLabel
+  const nextRoundHint =
+    gameMode === 'cpu_local' && state?.phase === 'score' ? null : roundRestartDecision.nextRoundHint
 
   const resetRoundAndSync = useCallback(() => {
+    if (gameMode === 'cpu_local') {
+      const current = stateRef.current
+      if (!current) return
+      dispatchAction({ id: `cpu:reset:${current.actionLog.length}`, type: 'resetRound' })
+      setSyncError(null)
+      return
+    }
     const activeRoom = roomSlugRef.current
     if (!activeRoom) return
     if (!roundRestartDecision.canStartNextRound) {
@@ -901,7 +1054,7 @@ export default function App() {
       .catch((error) => {
         setSyncError(error instanceof Error ? error.message : 'Failed to reset round')
       })
-  }, [applySnapshot, roomStore, roundRestartDecision.canStartNextRound, roundRestartDecision.nextRoundHint])
+  }, [applySnapshot, dispatchAction, gameMode, roomStore, roundRestartDecision.canStartNextRound, roundRestartDecision.nextRoundHint])
 
   useEffect(() => {
     stateRef.current = state
@@ -910,6 +1063,67 @@ export default function App() {
   useEffect(() => {
     writeLocalPlayerName(playerName)
   }, [playerName])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (state || view !== 'lobby') return
+
+    const params = new URLSearchParams(window.location.search)
+    const pathRoom = window.location.pathname.replace(/^\//, '')
+    const roomFromUrl = getParamInsensitive(params, 'room') ?? (pathRoom.length > 0 ? decodeURIComponent(pathRoom) : null)
+    if (roomFromUrl) return
+
+    const session = readCpuLocalSession()
+    if (!session) return
+    if (session.localPlayerId !== localPlayerId || !isCpuLocalState(session.state, localPlayerId)) {
+      clearCpuLocalSession()
+      return
+    }
+
+    actionCounter.value = seedActionCounterFromLog(session.state.actionLog, localPlayerId, session.actionCounter)
+    roomSlugRef.current = null
+    setRoomSlug(null)
+    setGameMode('cpu_local')
+    setView('table')
+    setRoomRole('host')
+    setPlayerCount(2)
+    setConnectedPeers([CPU_BOT_ID])
+    setParticipantPresenceById({})
+    setConnectivityByPlayerId({ [localPlayerId]: true, [CPU_BOT_ID]: true })
+    setWaitingMessage(null)
+    setSyncError(null)
+    setJoining(false)
+    setState(session.state)
+    lastHydrationSignatureRef.current = ''
+    lastPersistedStateSignatureRef.current = ''
+    latestPingTokenRef.current = ''
+    latestPingAtRef.current = 0
+    latestAckAtRef.current = 0
+    acknowledgedPeerPingRef.current = ''
+    bootstrapInProgressRef.current = false
+    bootstrapRoomRef.current = null
+    bootstrapStartedAtRef.current = 0
+    activeGameIdRef.current = null
+    activeActionsVersionRef.current = 0
+    roomReadyRef.current = false
+    outboundActionQueueRef.current = []
+    outboundFlushInFlightRef.current = false
+    localJoinedAtRef.current = undefined
+  }, [actionCounter, localPlayerId, state, view])
+
+  useEffect(() => {
+    if (gameMode !== 'cpu_local' || !state) return
+    if (!isCpuLocalState(state, localPlayerId)) return
+    const nextActionCounter = seedActionCounterFromLog(state.actionLog, localPlayerId, actionCounter.value)
+    actionCounter.value = nextActionCounter
+    writeCpuLocalSession({
+      version: 1,
+      localPlayerId,
+      state,
+      actionCounter: nextActionCounter,
+      savedAt: Date.now()
+    })
+  }, [actionCounter, gameMode, localPlayerId, state])
 
   useEffect(() => {
     if (!scoreboardOpen) return
@@ -1073,6 +1287,11 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      cpuPlannerKeyRef.current = ''
+      if (cpuPlannerTimeoutRef.current !== null) {
+        window.clearTimeout(cpuPlannerTimeoutRef.current)
+        cpuPlannerTimeoutRef.current = null
+      }
       pendingPresenceUpdateRef.current = null
       presenceWriteInFlightRef.current = false
       if (presenceWriteTimerRef.current !== null) {
@@ -1229,6 +1448,39 @@ export default function App() {
   }, [dispatchBatchAndSync, localPlayerId, state, useCrypto])
 
   useEffect(() => {
+    if (gameMode !== 'cpu_local' || !state) {
+      cpuPlannerKeyRef.current = ''
+      if (cpuPlannerTimeoutRef.current !== null) {
+        window.clearTimeout(cpuPlannerTimeoutRef.current)
+        cpuPlannerTimeoutRef.current = null
+      }
+      return
+    }
+
+    const plan = planCpuActions({
+      state,
+      cpuPlayerId: CPU_BOT_ID,
+      knownDeck,
+      delayMs: CPU_ACTION_DELAY_MS
+    })
+    if (!plan) {
+      cpuPlannerKeyRef.current = ''
+      return
+    }
+
+    if (cpuPlannerKeyRef.current === plan.key) return
+    cpuPlannerKeyRef.current = plan.key
+    if (cpuPlannerTimeoutRef.current !== null) {
+      window.clearTimeout(cpuPlannerTimeoutRef.current)
+      cpuPlannerTimeoutRef.current = null
+    }
+    cpuPlannerTimeoutRef.current = window.setTimeout(() => {
+      cpuPlannerTimeoutRef.current = null
+      dispatchBatchAndSync(plan.actions)
+    }, plan.delayMs)
+  }, [dispatchBatchAndSync, gameMode, knownDeck, state])
+
+  useEffect(() => {
     if (!state || state.phase !== 'play') return
     const current = state.players.find((player) => player.seat === state.turnSeat)
     if (!current || current.id !== localPlayerId) return
@@ -1358,6 +1610,17 @@ export default function App() {
           </a>
         </div>
         <div className="header-actions">
+          <button
+            className="button cpu-cta"
+            onClick={() => {
+              setRulesOpen(false)
+              setScoreboardOpen(false)
+              setSettingsOpen(false)
+              void startCpuGame()
+            }}
+          >
+            CPU Play
+          </button>
           <button
             className="button secondary"
             onClick={() => {
@@ -1504,6 +1767,9 @@ export default function App() {
           onStart={(room, host) => {
             void startDatabaseGame(room, host)
           }}
+          onStartCpu={() => {
+            void startCpuGame()
+          }}
           rooms={rooms}
           roomsLoading={roomsLoading}
           roomsError={roomsError}
@@ -1580,9 +1846,10 @@ export default function App() {
             dispatchBatchAndSync(actions)
           }}
           onResetRound={resetRoundAndSync}
-          canStartNextRound={roundRestartDecision.canStartNextRound}
-          nextRoundLabel={roundRestartDecision.nextRoundLabel}
-          nextRoundHint={roundRestartDecision.nextRoundHint}
+          onLeaveGame={gameMode === 'cpu_local' ? returnToLobby : undefined}
+          canStartNextRound={canStartNextRound}
+          nextRoundLabel={nextRoundLabel}
+          nextRoundHint={nextRoundHint}
           hideSubmit={hideSubmitButton}
           fourColor={fourColorDeck}
         />
