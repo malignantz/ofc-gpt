@@ -135,7 +135,8 @@ export function planCpuActions(input: CpuPlannerInput): PlannerOutput | null {
       visibleOpponentLines: getVisibleOpponentLines(state, input.cpuPlayerId),
       knownDeck: input.knownDeck,
       drawIndex: state.drawIndex,
-      signatureSeed: `${roundMarker}:initial`
+      signatureSeed: `${roundMarker}:initial`,
+      profile: input.profile
     })
 
     const placementByCard = new Map<string, keyof LinesState>()
@@ -191,7 +192,8 @@ export function planCpuActions(input: CpuPlannerInput): PlannerOutput | null {
       visibleOpponentLines: getVisibleOpponentLines(state, input.cpuPlayerId),
       knownDeck: input.knownDeck,
       drawIndex: state.drawIndex,
-      signatureSeed: `${roundMarker}:play`
+      signatureSeed: `${roundMarker}:play`,
+      profile: input.profile
     })
     const cardKey = toPlacementCardKey(card)
     const id = `cpu:place:play:${roundMarker}:${state.drawIndex}:${cardKey}:${choice.target}`
