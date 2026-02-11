@@ -39,7 +39,7 @@ describe('cpu planner', () => {
     ])
   })
 
-  it('emits deterministic setCombinedSeed + startRound actions in commit', () => {
+  it('emits setCombinedSeed + startRound actions in commit with random seeds', () => {
     let state = initialGameState(players)
     state = applyAction(state, { id: 'r1', type: 'ready', playerId: 'human' })
     state = applyAction(state, { id: 'r2', type: 'ready', playerId: '__cpu_bot__' })
@@ -60,7 +60,14 @@ describe('cpu planner', () => {
     expect(first).not.toBeNull()
     expect(first?.actions.map((action) => action.type)).toEqual(['setCombinedSeed', 'startRound'])
     expect(first?.actions.map((action) => action.id)).toEqual(['cpu:seed:r1', 'cpu:start:r1'])
-    expect(second).toEqual(first)
+    // Seeds should differ between calls due to random entropy injection
+    expect(second).not.toBeNull()
+    expect(second?.actions.map((action) => action.type)).toEqual(['setCombinedSeed', 'startRound'])
+    const firstSeed = first?.actions[0]?.type === 'setCombinedSeed' ? first.actions[0].seed : ''
+    const secondSeed = second?.actions[0]?.type === 'setCombinedSeed' ? second.actions[0].seed : ''
+    expect(firstSeed).toHaveLength(64)
+    expect(secondSeed).toHaveLength(64)
+    expect(firstSeed).not.toBe(secondSeed)
   })
 
   it('increments round identifiers after a reset so scoring round keys remain unique', () => {

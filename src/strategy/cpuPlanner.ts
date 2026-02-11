@@ -67,6 +67,12 @@ function deterministicSeedHex(signature: string): string {
   return chunks.join('')
 }
 
+function randomNonce(): string {
+  const bytes = new Uint8Array(16)
+  globalThis.crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 function actionKey(actions: GameAction[]): string {
   return actions.map((action) => action.id).join('|')
 }
@@ -105,7 +111,7 @@ export function planCpuActions(input: CpuPlannerInput): PlannerOutput | null {
     if (!dealer) return null
     const roundNumber = activeRoundNumber(state)
     const roundMarker = `r${roundNumber}`
-    const combinedSeed = deterministicSeedHex(`${roundMarker}:${stateSignature(state)}`)
+    const combinedSeed = deterministicSeedHex(`${roundMarker}:${stateSignature(state)}:${randomNonce()}`)
     const combinedId = `cpu:seed:${roundMarker}`
     const startId = `cpu:start:${roundMarker}`
     const actions: GameAction[] = []
