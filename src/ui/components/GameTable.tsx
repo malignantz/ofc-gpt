@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import type { Card as PlayingCard } from '../../engine/cards'
 import { cardToString, rankValue, stringToCard } from '../../engine/cards'
 import { evaluateFive, evaluateThree } from '../../engine/handEval'
@@ -330,6 +330,12 @@ export function GameTable({
   const autoPlayPlacementKeyRef = useRef('')
   const autoInitialSubmitKeyRef = useRef('')
   const initialHydrationSignatureRef = useRef('')
+  const [recentlyPlacedCards, setRecentlyPlacedCards] = useState<Set<string>>(new Set())
+  const [recentlyPlacedOpponentCards, setRecentlyPlacedOpponentCards] = useState<Set<string>>(new Set())
+  const prevOpponentLinesRef = useRef<Record<string, Record<string, string[]>>>({})
+  const prevPhaseRef = useRef(state.phase)
+  const [liveAnnouncement, setLiveAnnouncement] = useState('')
+  const [phaseTransition, setPhaseTransition] = useState(false)
   const initialDraftStorageKey = useMemo(
     () => buildInitialDraftStorageKey(localPlayerId, roomName),
     [localPlayerId, roomName]
@@ -535,11 +541,18 @@ export function GameTable({
     )
   }
 
+  const returnCardToPending = (card: string) => {
+    if (moveDraftCardToPending(card)) {
+      setSelectedCard(null)
+    }
+  }
+
   const placeSelectedCardOnLine = (target: keyof LinesState) => {
     if (!tapPlacementMode || !selectedCard) return
 
     if (state.phase === 'play') {
       if (canPlace && selectedCard.source === 'pending') {
+        markCardPlaced(selectedCard.card)
         onPlace(selectedCard.card, target)
         dismissTapPlacementHint()
         setSelectedCard(null)
@@ -548,6 +561,7 @@ export function GameTable({
     }
 
     if (state.phase !== 'initial' || !canAdjustInitial) return
+    markCardPlaced(selectedCard.card)
     if (!moveDraftCardToLine(selectedCard.card, target)) return
     dismissTapPlacementHint()
     setSelectedCard(null)
@@ -718,6 +732,7 @@ export function GameTable({
     const card = parsed?.card ?? event.dataTransfer.getData('text/plain')
     if (!card) return
 
+    markCardPlaced(card)
     if (state.phase !== 'initial') {
       onPlace(card, target)
       return
@@ -791,6 +806,82 @@ export function GameTable({
     setSelectedCard(null)
   }, [draftLines, draftPending, pendingCards, selectedCard, state.phase])
 
+  // Track phase transitions for animation + aria-live announcements
+  useEffect(() => {
+    if (prevPhaseRef.current !== state.phase) {
+      const prevPhase = prevPhaseRef.current
+      prevPhaseRef.current = state.phase
+      setPhaseTransition(true)
+      const timer = setTimeout(() => setPhaseTransition(false), 500)
+
+      // Generate aria-live announcement for screen readers
+      if (state.phase === 'initial' && prevPhase !== 'initial') {
+        setLiveAnnouncement('New round started. Arrange your starting hand.')
+      } else if (state.phase === 'play') {
+        setLiveAnnouncement('Play phase. Place cards one at a time.')
+      } else if (state.phase === 'score') {
+        setLiveAnnouncement('Round complete. Scores are being shown.')
+      }
+
+      return () => clearTimeout(timer)
+    }
+  }, [state.phase])
+
+  // Track recently placed cards for entrance animation
+  const markCardPlaced = useCallback((card: string) => {
+    setRecentlyPlacedCards((prev) => new Set(prev).add(card))
+    setTimeout(() => {
+      setRecentlyPlacedCards((prev) => {
+        const next = new Set(prev)
+        next.delete(card)
+        return next
+      })
+    }, 350)
+  }, [])
+
+  // Track opponent card placements for enter animation
+  useEffect(() => {
+    const newCards = new Set<string>()
+    for (const player of opponents) {
+      const prevLines = prevOpponentLinesRef.current[player.id]
+      const currLines = state.lines[player.id]
+      if (!currLines) continue
+      for (const line of ['top', 'middle', 'bottom'] as const) {
+        const prevCards = new Set(prevLines?.[line] ?? [])
+        for (const card of (currLines[line] ?? [])) {
+          const cs = typeof card === 'string' ? card : cardToString(card)
+          if (!prevCards.has(cs)) newCards.add(cs)
+        }
+      }
+    }
+    if (newCards.size > 0) {
+      setRecentlyPlacedOpponentCards((prev) => {
+        const next = new Set(prev)
+        for (const c of newCards) next.add(c)
+        return next
+      })
+      setTimeout(() => {
+        setRecentlyPlacedOpponentCards((prev) => {
+          const next = new Set(prev)
+          for (const c of newCards) next.delete(c)
+          return next
+        })
+      }, 400)
+    }
+    // Snapshot current opponent lines
+    const snapshot: Record<string, Record<string, string[]>> = {}
+    for (const player of opponents) {
+      const lines = state.lines[player.id]
+      if (!lines) continue
+      snapshot[player.id] = {
+        top: (lines.top ?? []).map((c) => typeof c === 'string' ? c : cardToString(c)),
+        middle: (lines.middle ?? []).map((c) => typeof c === 'string' ? c : cardToString(c)),
+        bottom: (lines.bottom ?? []).map((c) => typeof c === 'string' ? c : cardToString(c))
+      }
+    }
+    prevOpponentLinesRef.current = snapshot
+  }, [opponents, state.lines])
+
   // Contextual status message
   const statusMessage = useMemo(() => {
     const turnPlayer = state.players.find((p) => p.seat === state.turnSeat)
@@ -827,7 +918,8 @@ export function GameTable({
   const activeSeat = (state.phase === 'play' || state.phase === 'initial') ? state.turnSeat : -1
 
   return (
-    <section className="panel table-shell">
+    <section className={`panel table-shell${phaseTransition ? ' phase-transition' : ''}${state.phase === 'score' ? ' score-phase' : ''}`}>
+      <div className="sr-only" aria-live="polite" aria-atomic="true">{liveAnnouncement}</div>
       <div className="table-header">
         <div className="table-status">
           <div>
@@ -847,7 +939,7 @@ export function GameTable({
                 Reset
               </button>
               {!hideSubmit && (
-                <button className="button btn-sm" onClick={submitInitial} disabled={!canSubmitInitial}>
+                <button className={`button btn-sm${canSubmitInitial ? ' submit-ready-pulse' : ''}`} onClick={submitInitial} disabled={!canSubmitInitial}>
                   Confirm Hand
                 </button>
               )}
@@ -874,7 +966,7 @@ export function GameTable({
             {state.phase === 'score' && selectedMatchup?.fouls.player && <FoulBadge analysis={localFoulAnalysis} />}
             {state.phase === 'score' && selectedMatchup && (
               <div
-                className={`hand-result ${
+                className={`hand-result score-badge-enter ${
                   selectedMatchup.player.total > 0
                     ? 'hand-result-win'
                     : selectedMatchup.player.total < 0
@@ -906,13 +998,14 @@ export function GameTable({
         )}
         <div className="line-stack">
           <DropLine
-            label="Top (3)"
+            label="Top"
+            count={3}
             lineKey="top"
             cards={toCardStrings(state.phase === 'initial' ? draftLines.top : localLines?.top ?? [])}
             onDrop={(event) => handleDrop(event, 'top')}
             onDragOver={(canAdjustInitial || canPlace) ? allowDrop : allowDropIfActive}
             onLineTap={tapPlacementMode ? () => placeSelectedCardOnLine('top') : undefined}
-            onCardTap={tapPlacementMode ? selectLineCard : undefined}
+            onCardTap={tapPlacementMode ? selectLineCard : (canAdjustInitial ? (card) => returnCardToPending(card) : undefined)}
             draggable={!tapPlacementMode && canAdjustInitial}
             selectedCard={selectedCard}
             tapTargetState={selectedCard && tapPlacementMode ? (canTapPlaceOnLine('top') ? 'active' : 'blocked') : undefined}
@@ -920,15 +1013,17 @@ export function GameTable({
             scoreTone={overlayTone(selectedMatchup?.lines.top, hasBonus(selectedMatchup?.player))}
             royaltyText={localRoyaltyTextByLine.top}
             showScore={state.phase === 'score'}
+            recentlyPlaced={recentlyPlacedCards}
           />
           <DropLine
-            label="Middle (5)"
+            label="Middle"
+            count={5}
             lineKey="middle"
             cards={toCardStrings(state.phase === 'initial' ? draftLines.middle : localLines?.middle ?? [])}
             onDrop={(event) => handleDrop(event, 'middle')}
             onDragOver={(canAdjustInitial || canPlace) ? allowDrop : allowDropIfActive}
             onLineTap={tapPlacementMode ? () => placeSelectedCardOnLine('middle') : undefined}
-            onCardTap={tapPlacementMode ? selectLineCard : undefined}
+            onCardTap={tapPlacementMode ? selectLineCard : (canAdjustInitial ? (card) => returnCardToPending(card) : undefined)}
             draggable={!tapPlacementMode && canAdjustInitial}
             selectedCard={selectedCard}
             tapTargetState={selectedCard && tapPlacementMode ? (canTapPlaceOnLine('middle') ? 'active' : 'blocked') : undefined}
@@ -936,15 +1031,17 @@ export function GameTable({
             scoreTone={overlayTone(selectedMatchup?.lines.middle, hasBonus(selectedMatchup?.player))}
             royaltyText={localRoyaltyTextByLine.middle}
             showScore={state.phase === 'score'}
+            recentlyPlaced={recentlyPlacedCards}
           />
           <DropLine
-            label="Bottom (5)"
+            label="Bottom"
+            count={5}
             lineKey="bottom"
             cards={toCardStrings(state.phase === 'initial' ? draftLines.bottom : localLines?.bottom ?? [])}
             onDrop={(event) => handleDrop(event, 'bottom')}
             onDragOver={(canAdjustInitial || canPlace) ? allowDrop : allowDropIfActive}
             onLineTap={tapPlacementMode ? () => placeSelectedCardOnLine('bottom') : undefined}
-            onCardTap={tapPlacementMode ? selectLineCard : undefined}
+            onCardTap={tapPlacementMode ? selectLineCard : (canAdjustInitial ? (card) => returnCardToPending(card) : undefined)}
             draggable={!tapPlacementMode && canAdjustInitial}
             selectedCard={selectedCard}
             tapTargetState={selectedCard && tapPlacementMode ? (canTapPlaceOnLine('bottom') ? 'active' : 'blocked') : undefined}
@@ -952,13 +1049,14 @@ export function GameTable({
             scoreTone={overlayTone(selectedMatchup?.lines.bottom, hasBonus(selectedMatchup?.player))}
             royaltyText={localRoyaltyTextByLine.bottom}
             showScore={state.phase === 'score'}
+            recentlyPlaced={recentlyPlacedCards}
           />
         </div>
       </div>
 
       {/* Pending cards tray - directly below local lines */}
       <div
-        className={`pending-tray ${canTapReturnToPending ? 'pending-tray-tap-active' : ''}`}
+        className={`pending-tray${canTapReturnToPending ? ' pending-tray-tap-active' : ''}${state.phase === 'play' && pendingCards.length <= 1 ? ' pending-tray-compact' : ''}`}
         onClick={() => {
           if (!canTapReturnToPending || selectedCard?.source !== 'line') return
           if (moveDraftCardToPending(selectedCard.card)) {
@@ -1042,8 +1140,16 @@ export function GameTable({
               </div>
               <div className="seat-sub">
                 {isActive && state.phase === 'play' && <span className="turn-dot" />}
-                {isConnected(player.id) ? 'Connected' : `Waiting for ${player.name}`}
-                <span style={{ marginLeft: 8 }}>Pending {state.pending[player.id]?.length ?? 0}</span>
+                {(() => {
+                  const connected = isConnected(player.id)
+                  const pendingCount = state.pending[player.id]?.length ?? 0
+                  if (!connected) return `Reconnecting\u2026`
+                  if (state.phase === 'score') return null
+                  if (isActive && state.phase === 'play') return 'Thinking\u2026'
+                  if (state.phase === 'initial') return pendingCount > 0 ? 'Arranging hand\u2026' : 'Ready'
+                  if (pendingCount > 0) return `${pendingCount} card${pendingCount !== 1 ? 's' : ''} in hand`
+                  return null
+                })()}
               </div>
               <div className="line-stack">
                 <Line
@@ -1058,6 +1164,7 @@ export function GameTable({
                   )}
                   royaltyText={opponentRoyaltyTextById[player.id]?.top ?? null}
                   showScore={state.phase === 'score'}
+                  recentlyPlaced={recentlyPlacedOpponentCards}
                 />
                 <Line
                   label="Middle"
@@ -1071,6 +1178,7 @@ export function GameTable({
                   )}
                   royaltyText={opponentRoyaltyTextById[player.id]?.middle ?? null}
                   showScore={state.phase === 'score'}
+                  recentlyPlaced={recentlyPlacedOpponentCards}
                 />
                 <Line
                   label="Bottom"
@@ -1084,6 +1192,7 @@ export function GameTable({
                   )}
                   royaltyText={opponentRoyaltyTextById[player.id]?.bottom ?? null}
                   showScore={state.phase === 'score'}
+                  recentlyPlaced={recentlyPlacedOpponentCards}
                 />
               </div>
             </div>
@@ -1113,7 +1222,9 @@ function Line({
   size = 'normal',
   scoreTone,
   royaltyText,
-  showScore
+  showScore,
+  count,
+  recentlyPlaced
 }: {
   label: string
   lineKey: keyof LinesState
@@ -1123,23 +1234,37 @@ function Line({
   scoreTone?: 'win' | 'win-strong' | 'loss' | 'tie'
   royaltyText?: string | null
   showScore?: boolean
+  count?: number
+  recentlyPlaced?: Set<string>
 }) {
   const slotCount = lineKey === 'top' ? 3 : 5
   const sizeClass = size === 'small' ? 'line-size-small' : 'line-size-normal'
-  const lineClass = `${scoreTone ? `line line-score-${scoreTone}` : 'line'} line-cap-${slotCount} ${sizeClass}`
+  const staggerClass = showScore && scoreTone
+    ? `score-line-reveal${lineKey === 'middle' ? ' score-line-reveal-delay-1' : lineKey === 'bottom' ? ' score-line-reveal-delay-2' : ''}`
+    : ''
+  const lineClass = `${scoreTone ? `line line-score-${scoreTone}` : 'line'} line-cap-${slotCount} ${sizeClass} ${staggerClass}`.trim()
   const orderedCards = sortLineCardsForDisplay(lineKey, cards.map(cardToString))
-  const handRank = handRankLabelForDisplay(lineKey, orderedCards)
+  const handRank = showScore ? handRankLabelForDisplay(lineKey, orderedCards) : null
   const lineMeta =
-    handRank && showScore && royaltyText ? `${handRank} • ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
+    handRank && royaltyText ? `${handRank} • ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
+  const emptySlots = Math.max(0, slotCount - orderedCards.length)
   return (
     <div className={lineClass}>
       <div className="line-header">
-        <div className="line-label">{label}</div>
+        <div className="line-label">{label}{count !== undefined && <span className="line-count"> ({count})</span>}</div>
         {lineMeta ? <div className="line-royalty">{lineMeta}</div> : null}
       </div>
       <div className="cards">
-        {orderedCards.map((card) => (
-          <Card key={card} value={card} fourColor={fourColor} size={size} />
+        {orderedCards.map((card) => {
+          const cardStr = typeof card === 'string' ? card : `${card}`
+          return (
+            <div key={cardStr} className={recentlyPlaced?.has(cardStr) ? 'card-opponent-enter' : ''}>
+              <Card value={cardStr} fourColor={fourColor} size={size} />
+            </div>
+          )
+        })}
+        {Array.from({ length: emptySlots }, (_, i) => (
+          <div key={`empty-${i}`} className={`card-slot-empty${size === 'small' ? ' card-slot-empty-sm' : ''}`} />
         ))}
       </div>
     </div>
@@ -1160,7 +1285,9 @@ function DropLine({
   fourColor,
   scoreTone,
   royaltyText,
-  showScore
+  showScore,
+  recentlyPlaced,
+  count
 }: {
   label: string
   lineKey: keyof LinesState
@@ -1176,30 +1303,37 @@ function DropLine({
   scoreTone?: 'win' | 'win-strong' | 'loss' | 'tie'
   royaltyText?: string | null
   showScore?: boolean
+  recentlyPlaced?: Set<string>
+  count?: number
 }) {
   const slotCount = lineKey === 'top' ? 3 : 5
   const lineClass = `line drop line-cap-${slotCount} line-size-normal${scoreTone ? ` line-score-${scoreTone}` : ''}${tapTargetState ? ` line-tap-${tapTargetState}` : ''}`
   const orderedCards = sortLineCardsForDisplay(lineKey, cards)
-  const handRank = handRankLabelForDisplay(lineKey, orderedCards)
+  const handRank = showScore ? handRankLabelForDisplay(lineKey, orderedCards) : null
   const lineMeta =
-    handRank && showScore && royaltyText ? `${handRank} • ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
+    handRank && royaltyText ? `${handRank} • ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
+  const emptySlots = Math.max(0, slotCount - orderedCards.length)
   return (
     <div className={lineClass} onDrop={onDrop} onDragOver={onDragOver} onClick={onLineTap}>
       <div className="line-header">
-        <div className="line-label">{label}</div>
+        <div className="line-label">{label}{count !== undefined && <span className="line-count"> ({count})</span>}</div>
         {lineMeta ? <div className="line-royalty">{lineMeta}</div> : null}
       </div>
       <div className="cards">
         {orderedCards.map((card) => (
-          <Card
-            key={card}
-            value={card}
-            draggable={draggable}
-            onClick={(value) => onCardTap?.(value, lineKey)}
-            dragPayload={{ source: 'line', line: lineKey, card }}
-            selected={selectedCard?.source === 'line' && selectedCard.line === lineKey && selectedCard.card === card}
-            fourColor={fourColor}
-          />
+          <div key={card} className={recentlyPlaced?.has(card) ? 'card-place-enter' : ''}>
+            <Card
+              value={card}
+              draggable={draggable}
+              onClick={(value) => onCardTap?.(value, lineKey)}
+              dragPayload={{ source: 'line', line: lineKey, card }}
+              selected={selectedCard?.source === 'line' && selectedCard.line === lineKey && selectedCard.card === card}
+              fourColor={fourColor}
+            />
+          </div>
+        ))}
+        {Array.from({ length: emptySlots }, (_, i) => (
+          <div key={`empty-${i}`} className="card-slot-empty" />
         ))}
       </div>
     </div>

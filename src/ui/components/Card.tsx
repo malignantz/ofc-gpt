@@ -60,8 +60,10 @@ export function Card({
         dragImage.style.left = '-9999px'
         dragImage.style.pointerEvents = 'none'
         dragImage.style.opacity = '1'
+        dragImage.style.transform = 'scale(1.1)'
+        dragImage.style.boxShadow = '0 8px 20px rgba(31, 23, 17, 0.2)'
         document.body.appendChild(dragImage)
-        event.dataTransfer.setDragImage(dragImage, rect.width / 2, rect.height / 2)
+        event.dataTransfer.setDragImage(dragImage, (rect.width * 1.1) / 2, (rect.height * 1.1) / 2)
         window.setTimeout(() => dragImage.remove(), 0)
 
         // Apply "left-behind" style after the drag image is captured.
