@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useFocusTrap } from './hooks/useFocusTrap'
 import { buildDeck } from '../engine/deck'
 import { stringToCard } from '../engine/cards'
 import { combineSeeds, commitSeed, createSeedPair } from '../crypto/commitReveal'
@@ -321,6 +322,12 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
   const [scoreboardOpen, setScoreboardOpen] = useState(false)
+  const rulesModalRef = useRef<HTMLElement>(null)
+  const scoreboardModalRef = useRef<HTMLElement>(null)
+  const settingsModalRef = useRef<HTMLElement>(null)
+  useFocusTrap(rulesModalRef, rulesOpen)
+  useFocusTrap(scoreboardModalRef, scoreboardOpen)
+  useFocusTrap(settingsModalRef, settingsOpen)
   const [scoreboardEntries, setScoreboardEntries] = useState<ScoreboardEntry[]>([])
   const [fourColorDeck, setFourColorDeck] = useState(true)
   const [hideSubmitButton, setHideSubmitButton] = useState(false)
@@ -1668,6 +1675,7 @@ export default function App() {
       {rulesOpen && (
         <div className="modal-backdrop" onClick={() => setRulesOpen(false)} role="presentation">
           <section
+            ref={rulesModalRef}
             className="panel rules-modal"
             role="dialog"
             aria-modal="true"
@@ -1700,6 +1708,7 @@ export default function App() {
       {scoreboardOpen && (
         <div className="modal-backdrop" onClick={() => setScoreboardOpen(false)} role="presentation">
           <section
+            ref={scoreboardModalRef}
             className="panel scoreboard-modal"
             role="dialog"
             aria-modal="true"
@@ -1736,6 +1745,7 @@ export default function App() {
       {settingsOpen && (
         <div className="modal-backdrop" onClick={() => setSettingsOpen(false)} role="presentation">
           <section
+            ref={settingsModalRef}
             className="panel settings-panel settings-modal"
             role="dialog"
             aria-modal="true"
@@ -1748,31 +1758,37 @@ export default function App() {
                 &times;
               </button>
             </div>
-            <label className="setting-field">
-              <span>Player Name</span>
-              <input value={playerName} onChange={(event) => setPlayerName(event.target.value)} />
-            </label>
-            <label className="setting-field">
-              <span>CPU Profile</span>
-              <select
-                value={cpuProfile}
-                onChange={(event) => setCpuProfile(event.target.value as StrategyProfile)}
-              >
-                {CPU_PROFILE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="setting-row">
-              <input type="checkbox" checked={fourColorDeck} onChange={(event) => setFourColorDeck(event.target.checked)} />
-              4-Color Deck
-            </label>
-            <label className="setting-row">
-              <input type="checkbox" checked={hideSubmitButton} onChange={(event) => setHideSubmitButton(event.target.checked)} />
-              Hide Submit Button (initial)
-            </label>
+            <div className="settings-group">
+              <div className="settings-group-label">Display</div>
+              <label className="setting-field">
+                <span>Player Name</span>
+                <input value={playerName} onChange={(event) => setPlayerName(event.target.value)} />
+              </label>
+              <label className="setting-row">
+                <input type="checkbox" checked={fourColorDeck} onChange={(event) => setFourColorDeck(event.target.checked)} />
+                4-Color Deck
+              </label>
+            </div>
+            <div className="settings-group">
+              <div className="settings-group-label">Gameplay</div>
+              <label className="setting-field">
+                <span>CPU Profile</span>
+                <select
+                  value={cpuProfile}
+                  onChange={(event) => setCpuProfile(event.target.value as StrategyProfile)}
+                >
+                  {CPU_PROFILE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="setting-row">
+                <input type="checkbox" checked={hideSubmitButton} onChange={(event) => setHideSubmitButton(event.target.checked)} />
+                Hide Submit Button (initial)
+              </label>
+            </div>
           </section>
         </div>
       )}

@@ -30,12 +30,22 @@ export function Lobby({
   initialRoom
 }: LobbyProps) {
   const [roomCode] = useState(() => initialRoom ?? generateRoomName())
+  const [linkCopied, setLinkCopied] = useState(false)
   const activeRoomCount = rooms.length
+
+  const copyRoomLink = () => {
+    const url = `${window.location.origin}/${toRoomSlug(roomCode)}`
+    void navigator.clipboard.writeText(url).then(() => {
+      setLinkCopied(true)
+      setTimeout(() => setLinkCopied(false), 2000)
+    })
+  }
 
   return (
     <section className="panel lobby-panel">
       <header className="lobby-head">
         <h2>Lobby</h2>
+        <p className="lobby-intro">Open Face Chinese Poker — place 13 cards into 3 hands.</p>
       </header>
 
       <div className="lobby-focus">
@@ -44,9 +54,16 @@ export function Lobby({
             <h3>Join Game</h3>
             <span className="lobby-section-meta">{activeRoomCount} active</span>
           </div>
-          {roomsLoading && <p className="lobby-state">Loading active rooms...</p>}
+          {roomsLoading && (
+            <div className="skeleton-group">
+              <div className="skeleton-line" style={{ width: '80%' }} />
+              <div className="skeleton-line" style={{ width: '60%' }} />
+            </div>
+          )}
           {roomsError && <p className="lobby-state lobby-state-error">{roomsError}</p>}
-          {!roomsLoading && !roomsError && rooms.length === 0 && <p className="lobby-state">No active rooms yet.</p>}
+          {!roomsLoading && !roomsError && rooms.length === 0 && (
+            <p className="lobby-state">No one's playing yet — create a room or challenge the CPU!</p>
+          )}
           {!roomsLoading && !roomsError && rooms.length > 0 && (
             <div className="lobby-room-list">
               {rooms.map((room) => (
@@ -76,14 +93,19 @@ export function Lobby({
             <span className="lobby-section-meta">2 players</span>
           </div>
           <div className="lobby-room-code-wrap">
-            <p className="lobby-room-code-label">Room Code</p>
+            <div className="lobby-room-code-header">
+              <p className="lobby-room-code-label">Room Code</p>
+              <button className="button secondary btn-sm lobby-copy-btn" onClick={copyRoomLink}>
+                {linkCopied ? 'Copied!' : 'Copy Link'}
+              </button>
+            </div>
             <div className="lobby-room-code">{roomCode}</div>
           </div>
           <div className="lobby-create-actions">
             <button className="button lobby-create-button" onClick={() => onStart(toRoomSlug(roomCode), true)}>
               Create Game
             </button>
-            <button className="button secondary lobby-create-button" onClick={() => triggerCpuPlay(onStartCpu)}>
+            <button className="button cpu-cta lobby-create-button" onClick={() => triggerCpuPlay(onStartCpu)}>
               CPU Play
             </button>
           </div>
