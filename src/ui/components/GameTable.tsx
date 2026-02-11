@@ -300,7 +300,7 @@ export type GameTableProps = {
   canStartNextRound?: boolean
   nextRoundLabel?: string
   nextRoundHint?: string | null
-  hideSubmit?: boolean
+  manualConfirmInitialPlacements?: boolean
   fourColor?: boolean
 }
 
@@ -316,7 +316,7 @@ export function GameTable({
   canStartNextRound = true,
   nextRoundLabel = 'Next Round',
   nextRoundHint = null,
-  hideSubmit,
+  manualConfirmInitialPlacements = true,
   fourColor
 }: GameTableProps) {
   const localPlayer = state.players.find((player) => player.id === localPlayerId)
@@ -764,18 +764,10 @@ export function GameTable({
   }
 
   useEffect(() => {
-    if (hideSubmit && canSubmitInitial) {
+    if (!manualConfirmInitialPlacements && canSubmitInitial) {
       submitInitial()
     }
-  }, [canSubmitInitial, hideSubmit])
-
-  const resetInitial = () => {
-    if (state.phase !== 'initial') return
-    setSubmittedInitial(false)
-    setSelectedCard(null)
-    setDraftLines({ top: [], middle: [], bottom: [] })
-    setDraftPending(pending.map(cardToString))
-  }
+  }, [canSubmitInitial, manualConfirmInitialPlacements])
 
   useEffect(() => {
     if (state.phase !== 'initial') {
@@ -988,7 +980,6 @@ export function GameTable({
           <div>
             <div className="status-message">{statusMessage}</div>
             <div className="status-detail">
-              <span className={`presence-dot ${isConnected(localPlayerId) ? 'presence-online' : 'presence-offline'}`} />
               {localPlayer?.name ?? 'You'}
               {localPlayer?.seat === state.dealerSeat && <span className="dealer-chip">D</span>}
             </div>
@@ -998,10 +989,7 @@ export function GameTable({
         <div className="table-actions">
           {state.phase === 'initial' && (
             <>
-              <button className="button secondary btn-sm" onClick={resetInitial}>
-                Reset
-              </button>
-              {!hideSubmit && (
+              {manualConfirmInitialPlacements && (
                 <button className={`button btn-sm${canSubmitInitial ? ' submit-ready-pulse' : ''}`} onClick={submitInitial} disabled={!canSubmitInitial}>
                   Confirm Hand
                 </button>
@@ -1175,7 +1163,6 @@ export function GameTable({
             <div key={player.id} className={`seat seat-opponent ${isActive ? 'seat-active' : ''}`}>
               <div className="seat-head">
                 <div className="seat-title-wrap">
-                  <span className={`presence-dot ${isConnected(player.id) ? 'presence-online' : 'presence-offline'}`} />
                   <div className="seat-title">{player.name}</div>
                   {player.seat === state.dealerSeat && (
                     <span className="dealer-chip" title="Dealer button">D</span>

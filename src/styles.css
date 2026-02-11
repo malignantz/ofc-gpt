@@ -33,31 +33,6 @@
   color: var(--text);
 }
 
-[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #1a1e14;
-  --bg-alt: #141810;
-  --surface: rgba(38, 44, 32, 0.85);
-  --surface-strong: rgba(46, 54, 38, 0.94);
-  --surface-soft: rgba(34, 40, 28, 0.9);
-  --border: #3a4432;
-  --border-strong: #4a5840;
-  --text: #e4e0d6;
-  --text-muted: #a09882;
-  --shadow-soft: 0 10px 30px rgba(0, 0, 0, 0.25);
-  --shadow-raised: 0 16px 38px rgba(0, 0, 0, 0.35);
-  --card-bg: #2a3222;
-  --card-border: #4a5840;
-  --card-red: #e05050;
-  --card-slot-border: #3a4432;
-  --seat-bg: rgba(34, 40, 28, 0.8);
-  --line-border: #3a4432;
-  --win: #3dba6e;
-  --loss: #d04444;
-  --skeleton-from: #2a3222;
-  --skeleton-to: #1a1e14;
-}
-
 * {
   box-sizing: border-box;
 }
@@ -715,24 +690,6 @@ body {
   gap: 6px;
 }
 
-.presence-dot {
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 1px solid rgba(0, 0, 0, 0.16);
-}
-
-.presence-online {
-  background: #24a85a;
-  box-shadow: 0 0 0 2px rgba(36, 168, 90, 0.15);
-}
-
-.presence-offline {
-  background: #d45252;
-  box-shadow: 0 0 0 2px rgba(212, 82, 82, 0.12);
-}
-
 .dealer-chip {
   display: inline-flex;
   align-items: center;
@@ -1101,27 +1058,6 @@ body {
     ),
     linear-gradient(135deg, #c9462c, #8c2018);
   box-shadow: 0 2px 6px rgba(31, 23, 17, 0.1);
-}
-
-[data-theme="dark"] .card-back {
-  border-color: var(--card-border);
-  background:
-    repeating-linear-gradient(
-      45deg,
-      transparent,
-      transparent 3px,
-      rgba(200, 180, 150, 0.08) 3px,
-      rgba(200, 180, 150, 0.08) 4px
-    ),
-    repeating-linear-gradient(
-      -45deg,
-      transparent,
-      transparent 3px,
-      rgba(200, 180, 150, 0.08) 3px,
-      rgba(200, 180, 150, 0.08) 4px
-    ),
-    linear-gradient(135deg, #6b2e20, #4a1a12);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
 }
 
 .card-enter {
@@ -1656,135 +1592,6 @@ select {
     height: 64px;
   }
 }
-
-/* ---------- Dark Mode Overrides ---------- */
-
-[data-theme="dark"] .card.suit-h,
-[data-theme="dark"] .card.suit-d {
-  color: var(--card-red);
-}
-
-[data-theme="dark"] .card--four.suit-d { color: #5b9bff; }
-[data-theme="dark"] .card--four.suit-c { color: #4dcc7a; }
-[data-theme="dark"] .card--four.suit-h { color: #f06060; }
-[data-theme="dark"] .card--four.suit-s { color: #c8c0b4; }
-
-[data-theme="dark"] .card-drag-source {
-  border-color: var(--border);
-}
-
-[data-theme="dark"] .card-slot-empty {
-  background: rgba(255, 255, 255, 0.05);
-}
-
-[data-theme="dark"] .hand-result-win {
-  color: var(--win);
-  background: rgba(61, 186, 110, 0.18);
-  border-color: rgba(61, 186, 110, 0.4);
-}
-
-[data-theme="dark"] .hand-result-loss {
-  color: var(--loss);
-  background: rgba(208, 68, 68, 0.16);
-  border-color: rgba(208, 68, 68, 0.38);
-}
-
-[data-theme="dark"] .hand-result-tie {
-  color: #a09882;
-  background: rgba(160, 152, 130, 0.14);
-  border-color: rgba(160, 152, 130, 0.35);
-}
-
-[data-theme="dark"] .line-score-win { background: rgba(61, 186, 110, 0.12); border-color: rgba(61, 186, 110, 0.3); }
-[data-theme="dark"] .line-score-win-strong { background: rgba(61, 186, 110, 0.22); border-color: rgba(61, 186, 110, 0.5); }
-[data-theme="dark"] .line-score-loss { background: rgba(208, 68, 68, 0.12); border-color: rgba(208, 68, 68, 0.3); }
-[data-theme="dark"] .line-score-tie { background: rgba(160, 152, 130, 0.12); border-color: rgba(160, 152, 130, 0.3); }
-
-[data-theme="dark"] .foul-badge {
-  background: rgba(208, 68, 68, 0.14);
-  color: #f06060;
-  border-color: rgba(208, 68, 68, 0.35);
-}
-
-[data-theme="dark"] .modal-backdrop {
-  background: rgba(0, 0, 0, 0.6);
-}
-
-[data-theme="dark"] .dealer-chip {
-  background: #c9b8a4;
-  color: #1a1e14;
-}
-
-[data-theme="dark"] .presence-online { background: #4dcc7a; }
-
-[data-theme="dark"] .lobby-state {
-  border-color: var(--border);
-  background: var(--surface-soft);
-}
-
-[data-theme="dark"] .lobby-state-error {
-  border-color: rgba(208, 68, 68, 0.4);
-  background: rgba(208, 68, 68, 0.1);
-  color: #f06060;
-}
-
-[data-theme="dark"] .button {
-  background: var(--surface-strong);
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-[data-theme="dark"] .button:hover {
-  background: var(--border);
-}
-
-[data-theme="dark"] .button.secondary {
-  background: var(--surface);
-  border-color: var(--border);
-}
-
-[data-theme="dark"] .button.cpu-cta {
-  background: linear-gradient(135deg, #5a7a2a 0%, #3d5a1a 100%);
-  border-color: #4a6a22;
-  color: #e4e0d6;
-}
-
-[data-theme="dark"] .score-panel {
-  background: var(--surface);
-}
-
-[data-theme="dark"] .line.drop:hover {
-  border-color: #5b9bff;
-  background: rgba(91, 155, 255, 0.08);
-  box-shadow: 0 0 0 2px rgba(91, 155, 255, 0.15);
-}
-
-[data-theme="dark"] .line-tap-active {
-  border-color: #5b9bff;
-  background: rgba(91, 155, 255, 0.1);
-  box-shadow: 0 0 0 2px rgba(91, 155, 255, 0.2);
-}
-
-[data-theme="dark"] .pending-tray .card {
-  animation-name: pendingPulseDark;
-}
-
-@keyframes pendingPulseDark {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(91, 155, 255, 0); }
-  50% { box-shadow: 0 0 8px 2px rgba(91, 155, 255, 0.25); }
-}
-
-[data-theme="dark"] .local-seat.seat-active {
-  animation-name: seatPulseDark;
-}
-
-@keyframes seatPulseDark {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(91, 155, 255, 0); }
-  50% { box-shadow: 0 0 12px 3px rgba(91, 155, 255, 0.18); }
-}
-
-[data-theme="dark"] .rules-scroll::-webkit-scrollbar-thumb { background: #4a5840; }
-[data-theme="dark"] .rules-scroll { scrollbar-color: #4a5840 transparent; }
 
 /* --- Confetti --- */
 .confetti-container {

@@ -41,6 +41,7 @@ type PresenceUpdateInput = {
 
 const LOCAL_PLAYER_ID_KEY = 'ofc:local-player-id'
 const LOCAL_PLAYER_NAME_KEY = 'ofc:player-name'
+const MANUAL_CONFIRM_INITIAL_PLACEMENTS_KEY = 'ofc:manual-confirm-initial-placements-v1'
 const HEARTBEAT_MS = 15_000
 const MIN_PRESENCE_WRITE_MS = 1_000
 const PEER_PING_TIMEOUT_MS = HEARTBEAT_MS * 3
@@ -117,6 +118,27 @@ function writeLocalPlayerName(name: string) {
   if (typeof window === 'undefined') return
   try {
     window.localStorage.setItem(LOCAL_PLAYER_NAME_KEY, name)
+  } catch {
+    // Ignore storage write failures.
+  }
+}
+
+function readManualConfirmInitialPlacements(): boolean {
+  if (typeof window === 'undefined') return true
+  try {
+    const stored = window.localStorage.getItem(MANUAL_CONFIRM_INITIAL_PLACEMENTS_KEY)
+    if (stored === 'false') return false
+    if (stored === 'true') return true
+    return true
+  } catch {
+    return true
+  }
+}
+
+function writeManualConfirmInitialPlacements(value: boolean) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(MANUAL_CONFIRM_INITIAL_PLACEMENTS_KEY, String(value))
   } catch {
     // Ignore storage write failures.
   }
@@ -330,12 +352,9 @@ export default function App() {
   useFocusTrap(settingsModalRef, settingsOpen)
   const [scoreboardEntries, setScoreboardEntries] = useState<ScoreboardEntry[]>([])
   const [fourColorDeck, setFourColorDeck] = useState(true)
-  const [darkMode, setDarkMode] = useState(() => {
-    const saved = localStorage.getItem('ofc:dark-mode')
-    if (saved !== null) return saved === 'true'
-    return window.matchMedia('(prefers-color-scheme: dark)').matches
-  })
-  const [hideSubmitButton, setHideSubmitButton] = useState(false)
+  const [manualConfirmInitialPlacements, setManualConfirmInitialPlacements] = useState(() =>
+    readManualConfirmInitialPlacements()
+  )
   const [cpuProfile, setCpuProfile] = useState<StrategyProfile>(() => readCpuProfile())
   const [localPlayerId] = useState(() => getOrCreateLocalPlayerId())
   const [state, setState] = useState<GameState | null>(null)
@@ -1131,9 +1150,8 @@ export default function App() {
   }, [cpuProfile])
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light')
-    localStorage.setItem('ofc:dark-mode', String(darkMode))
-  }, [darkMode])
+    writeManualConfirmInitialPlacements(manualConfirmInitialPlacements)
+  }, [manualConfirmInitialPlacements])
 
   useEffect(() => {
     if (gameMode !== 'cpu_local' || !state) return
@@ -1786,10 +1804,6 @@ export default function App() {
                 <input type="checkbox" checked={fourColorDeck} onChange={(event) => setFourColorDeck(event.target.checked)} />
                 4-Color Deck
               </label>
-              <label className="setting-row">
-                <input type="checkbox" checked={darkMode} onChange={(event) => setDarkMode(event.target.checked)} />
-                Dark Mode
-              </label>
             </div>
             <div className="settings-group">
               <div className="settings-group-label">Gameplay</div>
@@ -1807,8 +1821,12 @@ export default function App() {
                 </select>
               </label>
               <label className="setting-row">
-                <input type="checkbox" checked={hideSubmitButton} onChange={(event) => setHideSubmitButton(event.target.checked)} />
-                Hide Submit Button (initial)
+                <input
+                  type="checkbox"
+                  checked={manualConfirmInitialPlacements}
+                  onChange={(event) => setManualConfirmInitialPlacements(event.target.checked)}
+                />
+                Manually confirm initial placements (first 5 cards)
               </label>
             </div>
           </section>
@@ -1905,7 +1923,7 @@ export default function App() {
           canStartNextRound={canStartNextRound}
           nextRoundLabel={nextRoundLabel}
           nextRoundHint={nextRoundHint}
-          hideSubmit={hideSubmitButton}
+          manualConfirmInitialPlacements={manualConfirmInitialPlacements}
           fourColor={fourColorDeck}
         />
       ) : (
