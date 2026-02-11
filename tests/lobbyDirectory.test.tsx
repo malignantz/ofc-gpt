@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { Lobby, triggerCpuPlay, triggerListedRoomJoin } from '../src/ui/components/Lobby'
+import { Lobby, triggerListedRoomJoin } from '../src/ui/components/Lobby'
 import type { RoomDirectoryEntry } from '../src/sync/roomStore'
 
 const rooms: RoomDirectoryEntry[] = [
@@ -22,7 +22,6 @@ describe('Lobby room directory', () => {
     const html = renderToStaticMarkup(
       <Lobby
         onStart={() => undefined}
-        onStartCpu={() => undefined}
         rooms={rooms}
         roomsLoading={false}
         roomsError={null}
@@ -34,7 +33,7 @@ describe('Lobby room directory', () => {
     expect(html).toContain('alpha-room')
     expect(html).toContain('1/2')
     expect(html).toContain('Host Host')
-    expect(html).toContain('CPU Play')
+    expect(html).not.toContain('CPU Play')
   })
 
   it('routes listed room join through callback helper', () => {
@@ -43,9 +42,4 @@ describe('Lobby room directory', () => {
     expect(onJoin).toHaveBeenCalledWith('alpha-room')
   })
 
-  it('routes CPU start through callback helper', () => {
-    const onStartCpu = vi.fn()
-    triggerCpuPlay(onStartCpu)
-    expect(onStartCpu).toHaveBeenCalledTimes(1)
-  })
 })

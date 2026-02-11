@@ -4,7 +4,6 @@ import type { RoomDirectoryEntry } from '../../sync/roomStore'
 
 type LobbyProps = {
   onStart: (roomName: string, host: boolean) => void
-  onStartCpu: () => void
   rooms: RoomDirectoryEntry[]
   roomsLoading: boolean
   roomsError: string | null
@@ -16,13 +15,8 @@ export function triggerListedRoomJoin(onJoinListedRoom: (roomId: string) => void
   onJoinListedRoom(roomId)
 }
 
-export function triggerCpuPlay(onStartCpu: () => void) {
-  onStartCpu()
-}
-
 export function Lobby({
   onStart,
-  onStartCpu,
   rooms,
   roomsLoading,
   roomsError,
@@ -104,9 +98,6 @@ export function Lobby({
           <div className="lobby-create-actions">
             <button className="button lobby-create-button" onClick={() => onStart(toRoomSlug(roomCode), true)}>
               Create Game
-            </button>
-            <button className="button cpu-cta lobby-create-button" onClick={() => triggerCpuPlay(onStartCpu)}>
-              CPU Play
             </button>
           </div>
         </section>

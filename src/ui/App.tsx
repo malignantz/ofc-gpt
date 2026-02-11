@@ -1826,9 +1826,6 @@ export default function App() {
           onStart={(room, host) => {
             void startDatabaseGame(room, host)
           }}
-          onStartCpu={() => {
-            void startCpuGame()
-          }}
           rooms={rooms}
           roomsLoading={roomsLoading}
           roomsError={roomsError}

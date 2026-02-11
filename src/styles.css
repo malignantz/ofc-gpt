@@ -834,7 +834,7 @@ body {
   gap: 8px;
   width: fit-content;
   max-width: 100%;
-  overflow-x: hidden;
+  overflow: hidden;
   padding-bottom: 2px;
 }
 
@@ -847,6 +847,7 @@ body {
   border-radius: 10px;
   padding: 6px 8px;
   min-height: 86px;
+  overflow: hidden;
   width: calc(
     var(--line-slot-count) * var(--line-card-width) +
     (var(--line-slot-count) - 1) * var(--line-card-gap) +
@@ -985,6 +986,7 @@ body {
 }
 
 .card {
+  box-sizing: border-box;
   width: clamp(46px, 7.2vw, 54px);
   height: clamp(66px, 10.4vw, 78px);
   border-radius: 8px;

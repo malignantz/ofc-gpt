@@ -1337,7 +1337,7 @@ function Line({
   const orderedCards = sortLineCardsForDisplay(lineKey, cards.map(cardToString))
   const handRank = showScore ? handRankLabelForDisplay(lineKey, orderedCards) : null
   const lineMeta =
-    handRank && royaltyText ? `${handRank} • ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
+    handRank && royaltyText ? `${handRank} ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
   const emptySlots = Math.max(0, slotCount - orderedCards.length)
   return (
     <div className={lineClass}>
@@ -1402,7 +1402,7 @@ function DropLine({
   const orderedCards = sortLineCardsForDisplay(lineKey, cards)
   const handRank = showScore ? handRankLabelForDisplay(lineKey, orderedCards) : null
   const lineMeta =
-    handRank && royaltyText ? `${handRank} • ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
+    handRank && royaltyText ? `${handRank} ${royaltyText}` : handRank ?? (showScore ? royaltyText : null)
   const emptySlots = Math.max(0, slotCount - orderedCards.length)
   return (
     <div className={lineClass} onDrop={onDrop} onDragOver={onDragOver} onClick={onLineTap}>
@@ -1550,49 +1550,15 @@ function buildRoyaltyTextByLine(
     return { top: null, middle: null, bottom: null }
   }
   return {
-    top: formatRoyaltyText(pointsByLine.top, royaltyNameForLine('top', lines.top)),
-    middle: formatRoyaltyText(pointsByLine.middle, royaltyNameForLine('middle', lines.middle)),
-    bottom: formatRoyaltyText(pointsByLine.bottom, royaltyNameForLine('bottom', lines.bottom))
+    top: formatRoyaltyText(pointsByLine.top),
+    middle: formatRoyaltyText(pointsByLine.middle),
+    bottom: formatRoyaltyText(pointsByLine.bottom)
   }
 }
 
-function formatRoyaltyText(points: number, name: string | null): string | null {
+function formatRoyaltyText(points: number): string | null {
   if (points <= 0) return null
-  if (!name) return `+${points}`
-  return `+${points} - ${name}`
-}
-
-function royaltyNameForLine(line: keyof LinesState, cards: PlayingCard[]): string | null {
-  try {
-    if (line === 'top') {
-      if (cards.length !== 3) return null
-      const hand = evaluateThree(cards)
-      if (hand.category === 2) return 'Three of a kind'
-      if (hand.category === 1) return 'One pair'
-      return null
-    }
-
-    if (cards.length !== 5) return null
-    const hand = evaluateFive(cards)
-    switch (hand.category) {
-      case 8:
-        return 'Straight flush'
-      case 7:
-        return 'Four of a kind'
-      case 6:
-        return 'Full house'
-      case 5:
-        return 'Flush'
-      case 4:
-        return 'Straight'
-      case 3:
-        return 'Three of a kind'
-      default:
-        return null
-    }
-  } catch {
-    return null
-  }
+  return `(+${points})`
 }
 
 function handRankNameForLine(line: keyof LinesState, cards: PlayingCard[]): string | null {
