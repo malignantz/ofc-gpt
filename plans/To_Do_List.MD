@@ -13,8 +13,8 @@ Currently cards are plain text divs (e.g. "Q♠", "8♣") rendered at 44×64px. 
 
 - [ ] **Replace text cards with SVG/image card faces** — Use a standard open-source playing card SVG set (e.g. [svg-cards](https://github.com/htdebeer/SVG-cards)). Render proper card faces with pips, court figures, etc.
 - [ ] **Fallback**: If full SVG cards are too heavy, create a hybrid: larger rank text + multiple suit pips arranged in the traditional pattern (e.g. a 9♠ shows 9 spade pips in the classic 3-3-3 layout).
-- [ ] **Card back design** — Add a card-back visual for opponent hidden cards (currently just shows nothing). A patterned card back adds polish.
-- [ ] **Increase card size** — 44×64px is quite small. Consider 56×80px default, 44×64px for opponent compact view.
+- [x] **Card back design** — Added patterned card-back visual (cross-hatch over crimson gradient) for opponent hidden hand cards. Shows face-down cards proportional to opponent's pending card count.
+- [x] **Increase card size** — Increased from 44×64px to 54×78px default (clamp-based), 44×64px mobile. Updated all related custom properties and empty slot sizes.
 
 ## 2. CARD ANIMATIONS & TRANSITIONS
 
@@ -45,7 +45,7 @@ Currently the only animation is a simple 0.2s fadeIn on card enter. There's no m
 
 The warm beige palette (#f2ede4) is tasteful but could use more depth and contrast.
 
-- [ ] **Add a dark mode** — The design system uses CSS custom properties, making this straightforward. Dark mode is expected in modern apps. Consider a dark green felt/table texture for poker atmosphere.
+- [x] **Add a dark mode** — Full dark mode with CSS custom properties. Dark green felt-inspired palette. Toggle in Settings modal, persists to localStorage, respects `prefers-color-scheme`. Comprehensive dark overrides for all UI elements.
 - [x] **Increase contrast on key elements** — Darkened muted text from #7c6f62 → #645749 and --text-muted from #685b4c → #5c5043 for WCAG AA compliance.
 - [x] **Suit colors in 4-color mode** — 4-color mode is now the default (`fourColorDeck` defaults to `true`).
 - [x] **Win/loss color intensity** — Increased opacity: win 0.14→0.2, win-strong 0.26→0.32, loss 0.12→0.18, tie 0.16→0.2.
@@ -86,8 +86,8 @@ The warm beige palette (#f2ede4) is tasteful but could use more depth and contra
 
 - [x] **Modal entry/exit animation** — Backdrop fade-in (0.15s) + dialog slide-up with scale (0.2s) added.
 - [x] **Rules modal scrollbar** — Styled with thin scrollbar (6px, warm #d4c5a9 color) for both Firefox (`scrollbar-width/color`) and WebKit.
-- [x] **Settings modal organization** — Split into "Display" (Player Name, 4-Color Deck) and "Gameplay" (CPU Profile, Hide Submit) groups with headers.
-- [ ] **Scoreboard data** — The scoreboard reads from localStorage rivalry data but could show more stats: rounds played, best score, longest win streak, etc.
+- [x] **Settings modal organization** — Split into "Display" (Player Name, 4-Color Deck, Dark Mode) and "Gameplay" (CPU Profile, Hide Submit) groups with headers.
+- [x] **Scoreboard data** — Enhanced with rounds played, best score, and win/loss streak tracking. Displayed in both the score panel rivalry view and the scoreboard modal.
 
 ## 9. TYPOGRAPHY & SPACING
 
@@ -96,14 +96,14 @@ The warm beige palette (#f2ede4) is tasteful but could use more depth and contra
 - [x] **Font loading** — Added Google Fonts import in index.html for Archivo (400-700), IBM Plex Sans (400-700), and IBM Plex Mono (500-600) with preconnect hints.
 - [x] **Line label spacing** — Split count into separate `<span className="line-count">` with lighter weight (400), reduced opacity (0.5), and smaller font (10px).
 - [x] **Status message sizing** — Added `min-height: 28px` to `.status-message` to prevent layout shift.
-- [ ] **Monospace alignment** — IBM Plex Mono is used for room codes and player counts. Ensure consistent sizing and baseline alignment.
+- [x] **Monospace alignment** — Ensured consistent `font-weight: 500/600`, `font-variant-numeric: tabular-nums`, and `line-height` across `.lobby-room-code`, `.lobby-room-players`, and `.status-room`.
 
 ## 10. PERFORMANCE & ACCESSIBILITY
 
 **Priority: MEDIUM | Impact: Quality**
 
 - [x] **Focus management in modals** — Added `useFocusTrap` hook that traps Tab/Shift+Tab within modal, focuses first element on open, and restores focus on close. Applied to all three modals (Rules, Scoreboard, Settings).
-- [ ] **Keyboard card placement** — No keyboard support for placing cards. Consider arrow keys to select card + number keys (1/2/3) for top/middle/bottom placement.
+- [x] **Keyboard card placement** — Arrow keys (Left/Right) to select pending cards + number keys (1/2/3) for top/middle/bottom placement. Works in both initial and play phases.
 - [x] **Screen reader announcements** — Added `aria-live="polite"` region in GameTable that announces phase transitions: "New round started", "Play phase", "Round complete".
 - [x] **Reduce layout shifts** — Already have min-heights on `.pending-tray .cards` (64px), `.line .cards` (64px), `.seat-opponent .line .cards` (48px), and `.status-message` (28px).
 - [x] **Prefers-reduced-motion** — Added `@media (prefers-reduced-motion: reduce)` disabling all animations.
@@ -121,28 +121,26 @@ The warm beige palette (#f2ede4) is tasteful but could use more depth and contra
 
 **Priority: LOW | Impact: Memorable experience**
 
-- [ ] **Confetti on sweep** — When a player sweeps all 3 lines, trigger a brief confetti/celebration animation.
-- [ ] **Streak counter** — Show a win streak badge ("🔥 3 wins") during gameplay.
+- [x] **Confetti on sweep** — When a player sweeps all 3 lines, triggers a 3-second CSS confetti burst animation with 40 colorful particles. Respects `prefers-reduced-motion`.
+- [x] **Streak counter** — Win/loss streak tracking persisted to localStorage. Displayed as "🔥 X win streak" in rivalry panel and scoreboard when streak > 1.
 - [ ] **Card flip for reveal** — When showing final score, flip opponent's cards from face-down to face-up sequentially for dramatic reveal.
-- [ ] **Dealer chip animation** — The "D" dealer chip could rotate/slide to the next player between rounds.
+- [x] **Dealer chip animation** — The "D" dealer chip now animates in with a scale+rotate entrance (0.5s cubic-bezier). Respects `prefers-reduced-motion`.
 - [ ] **Turn timer visual** — If a turn timer is added later, show a circular progress ring around the active player's section.
 
 ---
 
-## IMPLEMENTATION PRIORITY ORDER
+## REMAINING ITEMS (Future)
 
-1. **Card animations (placement, draw, phase transitions)** — Biggest bang for effort
-2. **Opponent status text cleanup** ("Connected Pending 0" → meaningful text)
-3. **Empty card slot placeholders** — Helps new players understand the layout
-4. **Drop zone highlighting improvements** — Better drag feedback
-5. **Card rendering upgrade** (SVG or enhanced text) — Visual leap
-6. **Score phase dramatic layout** — Satisfying round endings
-7. **Modal animations** — Quick polish win
-8. **Dark mode** — Expected feature, CSS vars make it easy
-9. **Lobby visual upgrade** — Better first impression
-10. **Accessibility improvements** — Focus trapping, keyboard nav, aria-live
+These items are deferred as they require external assets or larger feature work:
+
+1. **SVG/image card faces** — Needs external SVG card asset set
+2. **Hybrid pip layout** — Alternative to full SVG cards
+3. **Sound effects** — Needs audio files + toggle in settings
+4. **Swipe gestures** — Touch gesture library or custom implementation
+5. **Card flip reveal** — Requires refactoring opponent card rendering
+6. **Turn timer visual** — Depends on turn timer feature being added
 
 ---
 
-*Last updated: UI analysis session*
-*Files analyzed: styles.css, Card.tsx, GameTable.tsx, Lobby.tsx, App.tsx*
+*Last updated: Final UI polish session*
+*Files analyzed: styles.css, Card.tsx, GameTable.tsx, Lobby.tsx, App.tsx, scoreboard.ts*

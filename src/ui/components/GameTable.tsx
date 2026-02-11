@@ -25,6 +25,9 @@ type RivalryScore = {
   wins: number
   losses: number
   ties: number
+  streak: number
+  bestScore: number
+  roundsPlayed: number
   updatedAt: number
 }
 
@@ -335,6 +338,7 @@ export function GameTable({
   const prevOpponentLinesRef = useRef<Record<string, Record<string, string[]>>>({})
   const prevPhaseRef = useRef(state.phase)
   const [liveAnnouncement, setLiveAnnouncement] = useState('')
+  const [showConfetti, setShowConfetti] = useState(false)
   const [phaseTransition, setPhaseTransition] = useState(false)
   const initialDraftStorageKey = useMemo(
     () => buildInitialDraftStorageKey(localPlayerId, roomName),
@@ -827,6 +831,17 @@ export function GameTable({
     }
   }, [state.phase])
 
+  // Confetti on sweep win
+  useEffect(() => {
+    if (state.phase !== 'score') { setShowConfetti(false); return }
+    const hasSweepWin = Object.values(matchupByOpponent).some((m) => m.sweep && m.player.total > 0)
+    if (hasSweepWin) {
+      setShowConfetti(true)
+      const timer = setTimeout(() => setShowConfetti(false), 3000)
+      return () => clearTimeout(timer)
+    }
+  }, [state.phase, matchupByOpponent])
+
   // Track recently placed cards for entrance animation
   const markCardPlaced = useCallback((card: string) => {
     setRecentlyPlacedCards((prev) => new Set(prev).add(card))
@@ -881,6 +896,54 @@ export function GameTable({
     }
     prevOpponentLinesRef.current = snapshot
   }, [opponents, state.lines])
+
+  // Keyboard card placement: Left/Right to select, 1/2/3 to place on top/middle/bottom
+  useEffect(() => {
+    const handleKeyboard = (event: KeyboardEvent) => {
+      // Don't interfere with inputs or modals
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) return
+
+      const pending = visiblePendingCards
+      if (pending.length === 0) return
+
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault()
+        setSelectedCard((current) => {
+          const currentIndex = current?.source === 'pending' ? pending.indexOf(current.card) : -1
+          let nextIndex: number
+          if (event.key === 'ArrowRight') {
+            nextIndex = currentIndex < pending.length - 1 ? currentIndex + 1 : 0
+          } else {
+            nextIndex = currentIndex > 0 ? currentIndex - 1 : pending.length - 1
+          }
+          const card = pending[nextIndex]
+          return card ? { source: 'pending' as const, card } : null
+        })
+        return
+      }
+
+      const lineMap: Record<string, keyof LinesState> = { '1': 'top', '2': 'middle', '3': 'bottom' }
+      const targetLine = lineMap[event.key]
+      if (!targetLine) return
+
+      if (selectedCard?.source === 'pending') {
+        event.preventDefault()
+        if (state.phase === 'play' && canPlace) {
+          markCardPlaced(selectedCard.card)
+          onPlace(selectedCard.card, targetLine)
+          setSelectedCard(null)
+        } else if (state.phase === 'initial' && canAdjustInitial) {
+          if (moveDraftCardToLine(selectedCard.card, targetLine)) {
+            markCardPlaced(selectedCard.card)
+            setSelectedCard(null)
+          }
+        }
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyboard)
+    return () => document.removeEventListener('keydown', handleKeyboard)
+  }, [visiblePendingCards, selectedCard, state.phase, canPlace, canAdjustInitial, markCardPlaced, onPlace, moveDraftCardToLine])
 
   // Contextual status message
   const statusMessage = useMemo(() => {
@@ -1151,6 +1214,13 @@ export function GameTable({
                   return null
                 })()}
               </div>
+              {state.phase !== 'score' && (state.pending[player.id]?.length ?? 0) > 0 && (
+                <div className="opponent-hand-backs">
+                  {Array.from({ length: state.pending[player.id]?.length ?? 0 }, (_, i) => (
+                    <div key={i} className="card-back" />
+                  ))}
+                </div>
+              )}
               <div className="line-stack">
                 <Line
                   label="Top"
@@ -1208,6 +1278,27 @@ export function GameTable({
             currentOpponent={opponents.find((player) => player.id === currentOpponentId) ?? null}
             presentOpponentIds={new Set(opponents.map((player) => player.id))}
           />
+        </div>
+      )}
+
+      {showConfetti && (
+        <div className="confetti-container" aria-hidden="true">
+          {Array.from({ length: 40 }, (_, i) => (
+            <div
+              key={i}
+              className="confetti-piece"
+              style={{
+                left: `${Math.random() * 100}%`,
+                animationDelay: `${Math.random() * 0.8}s`,
+                animationDuration: `${1.5 + Math.random() * 1.5}s`,
+                backgroundColor: ['#f5a623', '#e74c3c', '#3498db', '#2ecc71', '#9b59b6', '#e67e22'][i % 6],
+                width: `${6 + Math.random() * 6}px`,
+                height: `${6 + Math.random() * 6}px`,
+                borderRadius: i % 3 === 0 ? '50%' : i % 3 === 1 ? '2px' : '0',
+                transform: `rotate(${Math.random() * 360}deg)`,
+              }}
+            />
+          ))}
         </div>
       )}
     </section>
@@ -1395,7 +1486,18 @@ function RivalryPanel({
           </div>
           <div className="rivalry-sub">
             W {current?.wins ?? 0} • L {current?.losses ?? 0} • T {current?.ties ?? 0}
+            {current && current.roundsPlayed > 0 && <> • {current.roundsPlayed} rounds</>}
           </div>
+          {current && (current.streak > 1 || current.streak < -1) && (
+            <div className="rivalry-streak">
+              {current.streak > 0
+                ? <span className="streak-win">{'\uD83D\uDD25'} {current.streak} win streak</span>
+                : <span className="streak-loss">{current.streak * -1} loss streak</span>}
+            </div>
+          )}
+          {current && current.bestScore !== undefined && current.roundsPlayed > 0 && (
+            <div className="rivalry-sub">Best: {formatSigned(current.bestScore)}</div>
+          )}
         </div>
       )}
 
@@ -1585,6 +1687,17 @@ function persistRivalryRound(
     const wins = (existing?.wins ?? 0) + (result.total > 0 ? 1 : 0)
     const losses = (existing?.losses ?? 0) + (result.total < 0 ? 1 : 0)
     const ties = (existing?.ties ?? 0) + (result.total === 0 ? 1 : 0)
+    const prevStreak = existing?.streak ?? 0
+    let streak: number
+    if (result.total > 0) {
+      streak = prevStreak >= 0 ? prevStreak + 1 : 1
+    } else if (result.total < 0) {
+      streak = prevStreak <= 0 ? prevStreak - 1 : -1
+    } else {
+      streak = 0
+    }
+    const roundsPlayed = (existing?.roundsPlayed ?? (existing ? existing.wins + existing.losses + existing.ties : 0)) + 1
+    const bestScore = Math.max(existing?.bestScore ?? -Infinity, result.total)
     rivals[result.opponentId] = {
       opponentId: result.opponentId,
       name: result.name,
@@ -1592,6 +1705,9 @@ function persistRivalryRound(
       wins,
       losses,
       ties,
+      streak,
+      bestScore: bestScore === -Infinity ? result.total : bestScore,
+      roundsPlayed,
       updatedAt
     }
   }
