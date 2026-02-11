@@ -330,6 +330,11 @@ export default function App() {
   useFocusTrap(settingsModalRef, settingsOpen)
   const [scoreboardEntries, setScoreboardEntries] = useState<ScoreboardEntry[]>([])
   const [fourColorDeck, setFourColorDeck] = useState(true)
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem('ofc:dark-mode')
+    if (saved !== null) return saved === 'true'
+    return window.matchMedia('(prefers-color-scheme: dark)').matches
+  })
   const [hideSubmitButton, setHideSubmitButton] = useState(false)
   const [cpuProfile, setCpuProfile] = useState<StrategyProfile>(() => readCpuProfile())
   const [localPlayerId] = useState(() => getOrCreateLocalPlayerId())
@@ -1126,6 +1131,11 @@ export default function App() {
   }, [cpuProfile])
 
   useEffect(() => {
+    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light')
+    localStorage.setItem('ofc:dark-mode', String(darkMode))
+  }, [darkMode])
+
+  useEffect(() => {
     if (gameMode !== 'cpu_local' || !state) return
     if (!isCpuLocalState(state, localPlayerId)) return
     const nextActionCounter = seedActionCounterFromLog(state.actionLog, localPlayerId, actionCounter.value)
@@ -1733,7 +1743,15 @@ export default function App() {
                     </div>
                     <div className="scoreboard-meta">
                       W {entry.wins} • L {entry.losses} • T {entry.ties}
+                      {entry.roundsPlayed > 0 && <> • {entry.roundsPlayed} rounds</>}
                     </div>
+                    {(entry.streak > 1 || entry.streak < -1 || entry.bestScore !== 0) && (
+                      <div className="scoreboard-extra">
+                        {entry.streak > 1 && <span className="streak-win">{'\uD83D\uDD25'} {entry.streak} streak</span>}
+                        {entry.streak < -1 && <span className="streak-loss">{entry.streak * -1} loss streak</span>}
+                        {entry.bestScore > 0 && <span className="scoreboard-best">Best: {formatSigned(entry.bestScore)}</span>}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1767,6 +1785,10 @@ export default function App() {
               <label className="setting-row">
                 <input type="checkbox" checked={fourColorDeck} onChange={(event) => setFourColorDeck(event.target.checked)} />
                 4-Color Deck
+              </label>
+              <label className="setting-row">
+                <input type="checkbox" checked={darkMode} onChange={(event) => setDarkMode(event.target.checked)} />
+                Dark Mode
               </label>
             </div>
             <div className="settings-group">

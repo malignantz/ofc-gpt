@@ -7,6 +7,9 @@ export type ScoreboardEntry = {
   wins: number
   losses: number
   ties: number
+  streak: number
+  bestScore: number
+  roundsPlayed: number
   updatedAt: number
 }
 
@@ -17,6 +20,9 @@ type RivalryScore = {
   wins: number
   losses: number
   ties: number
+  streak?: number
+  bestScore?: number
+  roundsPlayed?: number
   updatedAt: number
 }
 
@@ -63,6 +69,9 @@ function parseRivalryScore(value: unknown): RivalryScore | null {
     wins,
     losses,
     ties,
+    streak: asNumber(value.streak) ?? undefined,
+    bestScore: asNumber(value.bestScore) ?? undefined,
+    roundsPlayed: asNumber(value.roundsPlayed) ?? undefined,
     updatedAt
   }
 }
@@ -78,9 +87,16 @@ export function extractScoreboardEntries(storeValue: unknown): ScoreboardEntry[]
     for (const rivalRaw of Object.values(rivals)) {
       const rival = parseRivalryScore(rivalRaw)
       if (!rival) continue
+      const rp = rival.roundsPlayed ?? (rival.wins + rival.losses + rival.ties)
+      const bs = rival.bestScore ?? 0
       const existing = aggregated.get(rival.opponentId)
       if (!existing) {
-        aggregated.set(rival.opponentId, { ...rival })
+        aggregated.set(rival.opponentId, {
+          ...rival,
+          streak: rival.streak ?? 0,
+          bestScore: bs,
+          roundsPlayed: rp
+        })
         continue
       }
       const useIncomingName = rival.updatedAt >= existing.updatedAt
@@ -91,6 +107,9 @@ export function extractScoreboardEntries(storeValue: unknown): ScoreboardEntry[]
         wins: existing.wins + rival.wins,
         losses: existing.losses + rival.losses,
         ties: existing.ties + rival.ties,
+        streak: rival.updatedAt >= existing.updatedAt ? (rival.streak ?? 0) : existing.streak,
+        bestScore: Math.max(existing.bestScore, bs),
+        roundsPlayed: existing.roundsPlayed + rp,
         updatedAt: Math.max(existing.updatedAt, rival.updatedAt)
       })
     }
@@ -113,4 +132,3 @@ export function readScoreboardEntriesFromLocalStorage(storage?: StorageLike): Sc
     return []
   }
 }
-
