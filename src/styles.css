@@ -1593,6 +1593,94 @@ select {
   }
 }
 
+/* ---------- Desktop: Side-by-side layout ---------- */
+@media (min-width: 900px) {
+  .app {
+    max-width: 960px;
+  }
+
+  .table-shell {
+    max-width: 920px;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  /* Header spans full width */
+  .table-shell .table-header {
+    grid-column: 1 / -1;
+  }
+
+  /* Local player in left column */
+  .table-shell .local-seat {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  /* Pending tray below local seat, still in left column */
+  .table-shell .pending-tray {
+    grid-column: 1;
+    grid-row: 3;
+  }
+
+  /* Opponents in right column, spanning rows 2-3 */
+  .table-shell .opponents-row {
+    grid-column: 2;
+    grid-row: 2 / 4;
+    border-top: none;
+    margin-top: 0;
+    padding-top: 0;
+    grid-template-columns: 1fr;
+    align-self: start;
+  }
+
+  /* Score panel + confetti span full width */
+  .table-shell .score-panel {
+    grid-column: 1 / -1;
+  }
+
+  .table-shell .confetti-container {
+    grid-column: 1 / -1;
+  }
+
+  /* Score phase: use wider container */
+  .table-shell.score-phase {
+    max-width: 920px;
+  }
+
+  /* Promote opponent cards to normal size on desktop */
+  .seat-opponent .card-sm {
+    width: clamp(46px, 7.2vw, 54px);
+    height: clamp(66px, 10.4vw, 78px);
+    font-size: 15px;
+    border-radius: 8px;
+  }
+
+  .seat-opponent .card-slot-empty-sm {
+    width: clamp(46px, 7.2vw, 54px);
+    height: clamp(66px, 10.4vw, 78px);
+    border-radius: 8px;
+  }
+
+  .seat-opponent .line-size-small {
+    --line-card-width: 54px;
+    --line-card-gap: 5px;
+    --line-buffer: 32px;
+  }
+
+  .seat-opponent .line {
+    min-height: 86px;
+    padding: 6px 8px;
+  }
+
+  .seat-opponent .line .cards {
+    min-height: 64px;
+  }
+
+  .seat-opponent .line-label {
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+}
+
 /* --- Confetti --- */
 .confetti-container {
   position: absolute;
