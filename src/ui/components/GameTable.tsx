@@ -1620,12 +1620,20 @@ function scoreClass(value: number): string {
   return ''
 }
 
-function getCurrentRoundKey(state: GameState): string | null {
+export function getCurrentRoundKey(state: GameState): string | null {
+  let startRoundId: string | null = null
   for (let i = state.actionLog.length - 1; i >= 0; i -= 1) {
     const action = state.actionLog[i]
-    if (action?.type === 'startRound') return action.id
+    if (action?.type === 'startRound') {
+      startRoundId = action.id
+      break
+    }
   }
-  return state.combinedSeed ?? null
+  const combinedSeed = state.combinedSeed ?? null
+  if (startRoundId && combinedSeed) return `v2:${startRoundId}:${combinedSeed}`
+  if (startRoundId) return `v2:${startRoundId}`
+  if (combinedSeed) return `v2:seed:${combinedSeed}`
+  return null
 }
 
 function readRivalryScores(localPlayerId: string): Record<string, RivalryScore> {
