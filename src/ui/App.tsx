@@ -10,6 +10,7 @@ import { GameTable } from './components/GameTable'
 import { toRoomSlug } from './utils/roomNames'
 import { ROUND_TAKEOVER_TIMEOUT_MS, getRoundRestartDecision } from './utils/roundControl'
 import { ScoreboardEntry, readScoreboardEntriesFromLocalStorage } from './utils/scoreboard'
+import { resolveRoute } from './utils/routeResolution'
 import { resolveIncomingState, shouldIgnoreRegressiveSnapshot } from './utils/snapshotConsistency'
 import { hydrateRoomState, seedActionCounterFromLog, sortActionRecords } from '../sync/roomHydration'
 import { WAITING_OPPONENT_ID } from '../sync/constants'
@@ -220,20 +221,6 @@ export function resolveCpuSessionForLocalPlayer(
   if (session.localPlayerId !== localPlayerId) return null
   if (!isCpuLocalState(session.state, localPlayerId)) return null
   return session
-}
-
-function getParamInsensitive(params: URLSearchParams, key: string): string | null {
-  const lowered = key.toLowerCase()
-  for (const [k, value] of params.entries()) {
-    if (k.toLowerCase() === lowered) return value
-  }
-  return null
-}
-
-function parseJoinFlag(value: string | null): boolean {
-  if (!value) return false
-  const normalized = value.trim().toLowerCase()
-  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on'
 }
 
 function buildSharePath(roomSlug: string, role: RoomRole): string {
@@ -1299,33 +1286,46 @@ export default function App() {
   useEffect(() => {
     if (autoJoinRef.current) return
     const params = new URLSearchParams(window.location.search)
-    const pathRoom = window.location.pathname.replace(/^\//, '')
-    const room = getParamInsensitive(params, 'room') ?? (pathRoom.length > 0 ? decodeURIComponent(pathRoom) : null)
-    if (!room) return
-
-    const join = parseJoinFlag(getParamInsensitive(params, 'join'))
+    const route = resolveRoute(window.location.pathname, params)
+    if (route.kind === 'lobby') return
     autoJoinRef.current = true
-    void startDatabaseGame(room, !join)
-  }, [startDatabaseGame])
+    if (route.kind === 'cpu') {
+      void startCpuGame()
+      return
+    }
+    void startDatabaseGame(route.room, !route.join)
+  }, [startCpuGame, startDatabaseGame])
 
   useEffect(() => {
     if (roomSlug && view !== 'lobby') {
       const url = buildSharePath(roomSlug, roomRole)
       window.history.pushState({ room: roomSlug }, '', url)
+    } else if (gameMode === 'cpu_local' && view !== 'lobby') {
+      const onCpuRoute = window.location.pathname.toLowerCase() === '/cpu' && window.location.search.length === 0
+      if (onCpuRoute) {
+        window.history.replaceState({ mode: 'cpu_local' }, '', '/cpu')
+      } else {
+        window.history.pushState({ mode: 'cpu_local' }, '', '/cpu')
+      }
     } else if (view === 'lobby') {
       window.history.pushState({}, '', '/')
     }
-  }, [roomRole, roomSlug, view])
+  }, [gameMode, roomRole, roomSlug, view])
 
   useEffect(() => {
     const onPopState = () => {
-      if (window.location.pathname === '/' || window.location.pathname === '') {
+      const route = resolveRoute(window.location.pathname, new URLSearchParams(window.location.search))
+      if (route.kind === 'cpu') {
+        void startCpuGame()
+        return
+      }
+      if (route.kind === 'lobby') {
         returnToLobby()
       }
     }
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
-  }, [returnToLobby])
+  }, [returnToLobby, startCpuGame])
 
   useEffect(() => {
     return () => {
@@ -1850,10 +1850,10 @@ export default function App() {
           onJoinListedRoom={(listedRoomId) => {
             void startDatabaseGame(listedRoomId, false)
           }}
-          initialRoom={
-            getParamInsensitive(new URLSearchParams(window.location.search), 'room') ??
-            (window.location.pathname.replace(/^\//, '') || undefined)
-          }
+          initialRoom={(() => {
+            const route = resolveRoute(window.location.pathname, new URLSearchParams(window.location.search))
+            return route.kind === 'room' ? route.room : undefined
+          })()}
         />
       ) : activeTableState ? (
         <GameTable
@@ -1924,6 +1924,7 @@ export default function App() {
           nextRoundLabel={nextRoundLabel}
           nextRoundHint={nextRoundHint}
           manualConfirmInitialPlacements={manualConfirmInitialPlacements}
+          mode={gameMode}
           fourColor={fourColorDeck}
         />
       ) : (

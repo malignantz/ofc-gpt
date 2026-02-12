@@ -25,6 +25,97 @@ describe('GameTable room name display', () => {
     expect(html).toContain('Room: wolf-tree-4')
   })
 
+  it('does not render room label in cpu mode', () => {
+    const html = renderToStaticMarkup(
+      <GameTable
+        state={initialGameState(players)}
+        localPlayerId="p1"
+        mode="cpu_local"
+        onPlace={() => undefined}
+        onSubmitInitial={() => undefined}
+        onResetRound={() => undefined}
+      />
+    )
+
+    expect(html).not.toContain('Room:')
+    expect(html).not.toContain('status-room')
+  })
+
+  it('renders cpu-specific initial waiting text after initial placement submit', () => {
+    const html = renderToStaticMarkup(
+      <GameTable
+        state={initialSubmittedState()}
+        localPlayerId="p1"
+        mode="cpu_local"
+        onPlace={() => undefined}
+        onSubmitInitial={() => undefined}
+        onResetRound={() => undefined}
+      />
+    )
+
+    expect(html).toContain('CPU is arranging...')
+    expect(html).not.toContain('Waiting for others...')
+  })
+
+  it('renders cpu-specific play waiting text on opponent turn', () => {
+    const html = renderToStaticMarkup(
+      <GameTable
+        state={playWaitingState()}
+        localPlayerId="p1"
+        mode="cpu_local"
+        onPlace={() => undefined}
+        onSubmitInitial={() => undefined}
+        onResetRound={() => undefined}
+      />
+    )
+
+    expect(html).toContain('CPU is playing...')
+    expect(html).not.toContain('Waiting for Guest...')
+  })
+
+  it('suppresses reconnecting text in cpu mode', () => {
+    const html = renderToStaticMarkup(
+      <GameTable
+        state={playWaitingState()}
+        localPlayerId="p1"
+        mode="cpu_local"
+        connectivityByPlayerId={{ p1: true, p2: false }}
+        onPlace={() => undefined}
+        onSubmitInitial={() => undefined}
+        onResetRound={() => undefined}
+      />
+    )
+
+    expect(html).not.toContain('Reconnecting')
+  })
+
+  it('keeps online waiting and reconnecting messaging', () => {
+    const waitingHtml = renderToStaticMarkup(
+      <GameTable
+        state={playWaitingState()}
+        localPlayerId="p1"
+        mode="online"
+        onPlace={() => undefined}
+        onSubmitInitial={() => undefined}
+        onResetRound={() => undefined}
+      />
+    )
+    expect(waitingHtml).toContain('Waiting for Guest...')
+
+    const reconnectingHtml = renderToStaticMarkup(
+      <GameTable
+        state={playWaitingState()}
+        localPlayerId="p1"
+        mode="online"
+        connectivityByPlayerId={{ p1: true, p2: false }}
+        onPlace={() => undefined}
+        onSubmitInitial={() => undefined}
+        onResetRound={() => undefined}
+      />
+    )
+    expect(reconnectingHtml).toContain('Reconnecting')
+  })
+
   it('shows royalty labels with bonus names', () => {
     const state = scoreState({
       p1: {
@@ -49,7 +140,7 @@ describe('GameTable room name display', () => {
       />
     )
 
-    expect(html).toContain('+2 - Three of a kind')
+    expect(html).toContain('Three of a Kind (+2)')
   })
 
   it('shows foul offender line details', () => {
@@ -81,6 +172,29 @@ describe('GameTable room name display', () => {
   })
 
 })
+
+function initialSubmittedState(): GameState {
+  const state = initialGameState(players)
+  state.phase = 'initial'
+  state.lines = {
+    ...state.lines,
+    p1: {
+      top: ['AS', 'AD', '2C'].map(stringToCard),
+      middle: ['3H', '4D'].map(stringToCard),
+      bottom: []
+    }
+  }
+  state.pending = { p1: [], p2: [] }
+  return state
+}
+
+function playWaitingState(): GameState {
+  const state = initialGameState(players)
+  state.phase = 'play'
+  state.turnSeat = 1
+  state.turnStage = 'draw'
+  return state
+}
 
 function scoreState(linesByPlayer: {
   p1: { top: string[]; middle: string[]; bottom: string[] }

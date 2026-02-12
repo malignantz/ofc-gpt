@@ -301,6 +301,7 @@ export type GameTableProps = {
   nextRoundLabel?: string
   nextRoundHint?: string | null
   manualConfirmInitialPlacements?: boolean
+  mode?: 'online' | 'cpu_local'
   fourColor?: boolean
 }
 
@@ -317,6 +318,7 @@ export function GameTable({
   nextRoundLabel = 'Next Round',
   nextRoundHint = null,
   manualConfirmInitialPlacements = true,
+  mode = 'online',
   fourColor
 }: GameTableProps) {
   const localPlayer = state.players.find((player) => player.id === localPlayerId)
@@ -324,7 +326,14 @@ export function GameTable({
   const pending = state.pending[localPlayerId] ?? []
   const [draftLines, setDraftLines] = useState<DraftLines>({ top: [], middle: [], bottom: [] })
   const [draftPending, setDraftPending] = useState<string[]>([])
-  const [submittedInitial, setSubmittedInitial] = useState(false)
+  const [submittedInitial, setSubmittedInitial] = useState(() => {
+    if (state.phase !== 'initial') return false
+    const placed =
+      (localLines?.top?.length ?? 0) +
+      (localLines?.middle?.length ?? 0) +
+      (localLines?.bottom?.length ?? 0)
+    return pending.length === 0 && placed === 5
+  })
   const [tapPlacementMode, setTapPlacementMode] = useState(false)
   const [selectedCard, setSelectedCard] = useState<SelectedCardState | null>(null)
   const [showTapPlacementHint, setShowTapPlacementHint] = useState(false)
@@ -954,20 +963,22 @@ export function GameTable({
         return 'Shuffling deck...'
       case 'initial':
         return submittedInitial
-          ? 'Waiting for others...'
+          ? mode === 'cpu_local'
+            ? 'CPU is arranging...'
+            : 'Waiting for others...'
           : tapPlacementMode
             ? 'Tap a card, then tap a row'
             : 'Arrange your starting hand'
       case 'play':
         if (canPlace) return tapPlacementMode ? 'Tap your card, then a row' : 'Place your card'
         if (canDraw) return 'Drawing...'
-        return `Waiting for ${turnName}...`
+        return mode === 'cpu_local' ? 'CPU is playing...' : `Waiting for ${turnName}...`
       case 'score':
         return 'Round Complete'
       default:
         return ''
     }
-  }, [state.phase, state.turnSeat, state.players, localPlayerId, submittedInitial, canPlace, canDraw, tapPlacementMode, waitingMessage])
+  }, [state.phase, state.turnSeat, state.players, localPlayerId, submittedInitial, canPlace, canDraw, mode, tapPlacementMode, waitingMessage])
 
   // Which seat is currently active (for turn indicator)
   const activeSeat = (state.phase === 'play' || state.phase === 'initial') ? state.turnSeat : -1
@@ -1193,7 +1204,7 @@ export function GameTable({
                 {(() => {
                   const connected = isConnected(player.id)
                   const pendingCount = state.pending[player.id]?.length ?? 0
-                  if (!connected) return `Reconnecting\u2026`
+                  if (!connected) return mode === 'cpu_local' ? null : `Reconnecting\u2026`
                   if (state.phase === 'score') return null
                   if (isActive && state.phase === 'play') return 'Thinking\u2026'
                   if (state.phase === 'initial') return pendingCount > 0 ? 'Arranging hand\u2026' : 'Ready'
