@@ -187,7 +187,7 @@ function isCpuLocalState(state: GameState, localPlayerId: string): boolean {
 }
 
 function readCpuProfile(): StrategyProfile {
-  if (typeof window === 'undefined') return 'conservative_ev'
+  if (typeof window === 'undefined') return 'heuristic'
   try {
     const stored = window.localStorage.getItem(CPU_PROFILE_KEY)
     if (
@@ -198,9 +198,9 @@ function readCpuProfile(): StrategyProfile {
     ) {
       return stored
     }
-    return 'conservative_ev'
+    return 'heuristic'
   } catch {
-    return 'conservative_ev'
+    return 'heuristic'
   }
 }
 
