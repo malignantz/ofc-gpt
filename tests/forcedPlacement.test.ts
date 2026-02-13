@@ -139,9 +139,14 @@ describe('line display ordering', () => {
     expect(ranksOnly(ordered)).toBe('44AQ5')
   })
 
-  it('orders a straight in sequence', () => {
+  it('orders a straight high to low', () => {
     const ordered = sortLineCardsForDisplay('middle', ['6S', '2D', '4H', '5C', '3S'])
-    expect(ranksOnly(ordered)).toBe('23456')
+    expect(ranksOnly(ordered)).toBe('65432')
+  })
+
+  it('orders a wheel straight in reverse order', () => {
+    const ordered = sortLineCardsForDisplay('middle', ['AH', '2D', '3C', '4S', '5H'])
+    expect(ranksOnly(ordered)).toBe('A2345')
   })
 
   it('orders a flush by descending rank', () => {

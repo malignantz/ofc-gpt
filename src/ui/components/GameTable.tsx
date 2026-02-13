@@ -218,9 +218,9 @@ function cardsForRank(groups: Map<number, PlayingCard[]>, rank: number): Playing
   return [...(groups.get(rank) ?? [])]
 }
 
-function sortStraightCardsAscending(cards: PlayingCard[], highCard: number): PlayingCard[] {
+function sortStraightCardsDescending(cards: PlayingCard[], highCard: number): PlayingCard[] {
   const groups = groupCardsByRank(cards)
-  const order = highCard === 5 ? [14, 2, 3, 4, 5] : [highCard - 4, highCard - 3, highCard - 2, highCard - 1, highCard]
+  const order = highCard === 5 ? [14, 2, 3, 4, 5] : [highCard, highCard - 1, highCard - 2, highCard - 3, highCard - 4]
   const ordered: PlayingCard[] = []
   for (const rank of order) {
     const card = cardsForRank(groups, rank)[0]
@@ -242,7 +242,7 @@ function sortFiveCardLine(cards: PlayingCard[]): PlayingCard[] {
   switch (hand.category) {
     case 8:
     case 4:
-      return sortStraightCardsAscending(cards, hand.kickers[0] ?? 0)
+      return sortStraightCardsDescending(cards, hand.kickers[0] ?? 0)
     case 7: {
       const quad = hand.kickers[0] ?? 0
       return [...cardsForRank(groups, quad), ...restDescending([quad])]
